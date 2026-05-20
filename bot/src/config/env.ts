@@ -26,11 +26,14 @@ const schema = z.object({
 
 export type Env = z.infer<typeof schema>;
 
-export const env: Env = (() => {
+function loadAndValidate(): Env {
   const result = schema.safeParse(process.env);
   if (!result.success) {
+    // eslint-disable-next-line no-console
     console.error('Invalid environment variables:', result.error.format());
     process.exit(1);
   }
   return result.data;
-})();
+}
+
+export const env: Env = loadAndValidate();

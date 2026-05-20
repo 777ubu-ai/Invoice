@@ -8,17 +8,19 @@ async function main(): Promise<void> {
   const username = env.INITIAL_OWNER_USERNAME;
   const fullName = env.INITIAL_OWNER_NAME;
 
-  if (!tgId || !username || !fullName) {
+  if (tgId == null || !username || !fullName) {
     logger.error(
       'Set INITIAL_OWNER_TG_USER_ID, INITIAL_OWNER_USERNAME, INITIAL_OWNER_NAME in .env',
     );
     process.exit(1);
+    return;
   }
 
   const existing = await findByTelegramId(tgId);
   if (existing) {
     logger.info({ id: existing.id, role: existing.role }, 'OWNER already exists');
     process.exit(0);
+    return;
   }
 
   const owner = await createUser({

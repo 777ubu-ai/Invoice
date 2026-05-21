@@ -57,6 +57,7 @@ export interface InvoiceState {
   assigned_to?: string | null;
   created_by?: string | null;
   reassigned_from?: string | null;
+  source_file_url?: string | null;
 }
 
 export interface UploadInput {

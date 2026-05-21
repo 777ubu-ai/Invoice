@@ -4,7 +4,15 @@ import { join } from 'node:path';
 import ExcelJS from 'exceljs';
 import { supabase } from './supabase.js';
 import { logger } from '../utils/logger.js';
-import { classifyWithClaude, isClaudeEnabled, type ClassifiedItem } from './classifier.js';
+import {
+  classifyWithClaude,
+  extractAndClassifyFromText,
+  isClaudeEnabled,
+  type ClassifiedItem,
+  type ExtractedClassifiedItem,
+} from './classifier.js';
+import { fetchTelegramFile } from './file-fetcher.js';
+import { parseXlsxBuffer, rowsAsText } from './xlsx-parser.js';
 import type {
   ApiClient,
   ApproveResult,
@@ -43,6 +51,54 @@ function buildRawItems(): Array<Omit<InvoiceItem, 'tnved_code' | 'tnved_descript
     { article: 'K48-12', text_original: '金属配件 K48', text_translated: 'Металлические фитинги K48', quantity: 1920, gross_kg: 384, net_kg: 365 },
     { article: 'M58-XX', text_original: '配件 M58', text_translated: 'Фитинг M58', quantity: 1230, gross_kg: 1386, net_kg: 1317 },
   ];
+}
+
+// Download an uploaded packing list from Telegram, parse xlsx, send to Claude
+// to both extract items AND classify them. Falls back to demo data on failure.
+async function classifyFromUploadedFile(
+  fileRef: string,
+  fileName?: string,
+): Promise<InvoiceItem[] | null> {
+  // fileRef format: "tg:<file_id>"
+  if (!fileRef.startsWith('tg:')) {
+    logger.warn({ fileRef }, 'unsupported file ref format');
+    return null;
+  }
+  const fileId = fileRef.slice('tg:'.length);
+  const lower = (fileName ?? '').toLowerCase();
+  if (!lower.endsWith('.xlsx')) {
+    logger.warn({ fileName }, 'only xlsx supported for real parsing — falling back to demo');
+    return null;
+  }
+
+  const buf = await fetchTelegramFile(fileId);
+  const parsed = await parseXlsxBuffer(buf, fileName);
+  if (parsed.totalRows === 0) {
+    logger.warn({ fileName }, 'xlsx had no rows');
+    return null;
+  }
+  logger.info({ fileName, rows: parsed.totalRows }, 'parsed xlsx');
+
+  const fileText = rowsAsText(parsed);
+  const extracted: ExtractedClassifiedItem[] = await extractAndClassifyFromText(fileText);
+
+  return extracted.map((it, idx) => ({
+    index: idx + 1,
+    article: it.article || `ITEM-${idx + 1}`,
+    text_original: it.text_original || '',
+    text_translated: it.text_translated || '',
+    quantity: it.quantity || 0,
+    gross_kg: it.gross_kg || 0,
+    net_kg: it.net_kg || Math.round((it.gross_kg || 0) * 0.95),
+    tnved_code: it.tnved_code,
+    tnved_description: it.tnved_description,
+    duty_rate: it.duty_rate,
+    confidence: it.confidence,
+    needs_review: it.needs_review,
+    review_reason: it.needs_review ? 'Низкая уверенность модели' : undefined,
+    reasoning: it.reasoning,
+    alternatives: it.alternatives,
+  }));
 }
 
 // Send raw items to Claude for TN VED classification, then merge with physical data.
@@ -250,11 +306,11 @@ function computeSummary(
   const total = duty + vat + fee;
 
   return {
-    items_count: 67,
+    items_count: items.length,
     codes_count: new Set(items.map((i) => i.tnved_code)).size,
-    gross_kg: 31176,
-    net_kg: 29618,
-    units_total: 213670,
+    gross_kg: gross,
+    net_kg: net,
+    units_total: units,
     cost_usd: cost,
     duty_usd: duty,
     vat_usd: vat,
@@ -553,13 +609,19 @@ export class MockApiClient implements ApiClient {
 
   async uploadFile(input: UploadInput): Promise<UploadResult> {
     const invoiceNumber = await generateInvoiceNumber();
+    // Encode filename into source_file_url so we can recover it during classify.
+    // Format: "tg:<file_id>?name=<filename>"
+    let storedUrl: string | null = input.fileUrl ?? null;
+    if (storedUrl?.startsWith('tg:')) {
+      storedUrl = `${storedUrl}?name=${encodeURIComponent(input.fileName)}`;
+    }
     const { data, error } = await supabase
       .from('invoices')
       .insert({
         invoice_number: invoiceNumber,
         client_name: input.clientName,
         status: 'UPLOADED' as InvoiceStatus,
-        source_file_url: input.fileUrl ?? null,
+        source_file_url: storedUrl,
         telegram_chat_id: input.telegramChatId,
         created_by: input.createdById,
         assigned_to: input.assignedToId,
@@ -568,12 +630,27 @@ export class MockApiClient implements ApiClient {
       .single();
     if (error) throw error;
 
+    // Peek at the file at upload time so the user sees the real row count.
+    // Weights and total quantity will be computed by Claude during classification.
+    let itemsCount = 0;
+    if (input.fileUrl?.startsWith('tg:') && input.fileName.toLowerCase().endsWith('.xlsx')) {
+      try {
+        const fileId = input.fileUrl.slice('tg:'.length);
+        const buf = await fetchTelegramFile(fileId);
+        const parsed = await parseXlsxBuffer(buf, input.fileName);
+        itemsCount = parsed.totalRows;
+        logger.info({ fileName: input.fileName, rows: parsed.totalRows }, 'preview parse ok');
+      } catch (err) {
+        logger.warn({ err, fileName: input.fileName }, 'upload-time preview parse failed');
+      }
+    }
+
     return {
       invoiceId: data.id,
       invoiceNumber: data.invoice_number,
-      itemsCount: 67,
-      grossKg: 31176,
-      unitsTotal: 213670,
+      itemsCount,
+      grossKg: 0,
+      unitsTotal: 0,
     };
   }
 
@@ -584,30 +661,49 @@ export class MockApiClient implements ApiClient {
       price_value: value ?? null,
     });
 
-    // If Claude API is configured, use it. Otherwise fall back to canned data
-    // (preserves a working demo when no key is set).
     const useClaude = isClaudeEnabled();
+    // Real file parsing + classification needs no artificial delay — Claude
+    // takes ~10-20s on its own. Without Claude, simulate the 8s wait.
     const delay = useClaude ? 0 : CLASSIFICATION_DELAY_MS;
 
     setTimeout(() => {
       void (async () => {
+        let source: 'file' | 'mock-claude' | 'canned' = 'canned';
         try {
-          const items = useClaude
-            ? await classifyViaClaude()
-            : buildCannedItems();
+          let items: InvoiceItem[] | null = null;
+
+          // 1) Try real file flow: download from Telegram, parse xlsx, send to Claude.
+          if (useClaude) {
+            const inv = await getInvoiceRow(invoiceId);
+            const fileRef = inv.source_file_url ?? '';
+            const fileName = (fileRef.match(/(?:file_name=)?([^/]+\.xlsx)$/i) ?? [])[1];
+            // For now we use the original filename if stored in source_file_url
+            // suffix; fallback is whatever we can detect.
+            if (fileRef.startsWith('tg:')) {
+              try {
+                items = await classifyFromUploadedFile(fileRef, fileName ?? `${inv.invoice_number}.xlsx`);
+                if (items && items.length > 0) source = 'file';
+              } catch (err) {
+                logger.warn({ err, invoiceId }, 'real file classification failed, falling back');
+              }
+            }
+          }
+
+          // 2) Fallback: canned items classified by Claude (if key set) or canned static
+          if (!items || items.length === 0) {
+            items = useClaude ? await classifyViaClaude() : buildCannedItems();
+            source = useClaude ? 'mock-claude' : 'canned';
+          }
+
           const summary = computeSummary(items, mode, value);
           await setInvoiceFields(invoiceId, {
             status: 'REVIEW' as InvoiceStatus,
             items,
             summary,
           });
-          logger.info(
-            { invoiceId, source: useClaude ? 'claude' : 'mock' },
-            'classification done',
-          );
+          logger.info({ invoiceId, source, count: items.length }, 'classification done');
         } catch (err) {
           logger.error({ err, invoiceId }, 'classification failed');
-          // Fall back to canned data if Claude call failed.
           try {
             const items = buildCannedItems();
             const summary = computeSummary(items, mode, value);
@@ -617,7 +713,7 @@ export class MockApiClient implements ApiClient {
               summary,
             });
             logger.warn({ invoiceId }, 'fell back to canned data after error');
-          } catch (innerErr) {
+          } catch (_innerErr) {
             await setInvoiceFields(invoiceId, { status: 'FAILED' as InvoiceStatus }).catch(() => {});
           }
         }

@@ -81,14 +81,15 @@ export async function newInvoiceConversation(
     payload: { client: clientName, file: fileName },
   });
 
-  await ctx.reply(
-    `✅ Файл получен\n` +
-      `📊 ${upload.itemsCount} позиций\n` +
-      `⚖️ ${upload.grossKg.toLocaleString('ru-RU')} кг брутто (предварительно)\n` +
-      `🔢 ${upload.unitsTotal.toLocaleString('ru-RU')} шт\n\n` +
-      `Режим стоимости?`,
-    { reply_markup: priceModeKeyboard(upload.invoiceId) },
-  );
+  const previewLines = [
+    '✅ Файл получен',
+    upload.itemsCount > 0
+      ? `📊 ${upload.itemsCount} строк в файле (точное число позиций после классификации)`
+      : '📊 Файл будет распарсен на этапе классификации',
+    '',
+    'Режим стоимости?',
+  ].join('\n');
+  await ctx.reply(previewLines, { reply_markup: priceModeKeyboard(upload.invoiceId) });
 
   // 4. Wait for mode.
   const modeCb = await conversation.waitFor('callback_query:data');

@@ -53,33 +53,48 @@ function buildRawItems(): Array<Omit<InvoiceItem, 'tnved_code' | 'tnved_descript
   ];
 }
 
+// Decode a stored source_file_url of the form "tg:<file_id>?name=<encoded>".
+function parseSourceFileUrl(
+  url: string | null | undefined,
+): { fileId: string; fileName: string } | null {
+  if (!url || !url.startsWith('tg:')) return null;
+  const rest = url.slice('tg:'.length);
+  const qIdx = rest.indexOf('?');
+  const fileId = qIdx >= 0 ? rest.slice(0, qIdx) : rest;
+  let fileName = '';
+  if (qIdx >= 0) {
+    const params = new URLSearchParams(rest.slice(qIdx + 1));
+    fileName = params.get('name') ?? '';
+  }
+  return { fileId, fileName };
+}
+
 // Download an uploaded packing list from Telegram, parse xlsx, send to Claude
 // to both extract items AND classify them. Falls back to demo data on failure.
 async function classifyFromUploadedFile(
   fileRef: string,
-  fileName?: string,
 ): Promise<InvoiceItem[] | null> {
-  // fileRef format: "tg:<file_id>"
-  if (!fileRef.startsWith('tg:')) {
+  const parsed = parseSourceFileUrl(fileRef);
+  if (!parsed) {
     logger.warn({ fileRef }, 'unsupported file ref format');
     return null;
   }
-  const fileId = fileRef.slice('tg:'.length);
-  const lower = (fileName ?? '').toLowerCase();
+  const { fileId, fileName } = parsed;
+  const lower = fileName.toLowerCase();
   if (!lower.endsWith('.xlsx')) {
     logger.warn({ fileName }, 'only xlsx supported for real parsing — falling back to demo');
     return null;
   }
 
   const buf = await fetchTelegramFile(fileId);
-  const parsed = await parseXlsxBuffer(buf, fileName);
-  if (parsed.totalRows === 0) {
+  const parsedXlsx = await parseXlsxBuffer(buf, fileName);
+  if (parsedXlsx.totalRows === 0) {
     logger.warn({ fileName }, 'xlsx had no rows');
     return null;
   }
-  logger.info({ fileName, rows: parsed.totalRows }, 'parsed xlsx');
+  logger.info({ fileName, rows: parsedXlsx.totalRows }, 'parsed xlsx');
 
-  const fileText = rowsAsText(parsed);
+  const fileText = rowsAsText(parsedXlsx);
   const extracted: ExtractedClassifiedItem[] = await extractAndClassifyFromText(fileText);
 
   return extracted.map((it, idx) => ({
@@ -361,28 +376,75 @@ async function generateInvoiceNumber(): Promise<string> {
   return `2026-C351-${seq}`;
 }
 
+// Per-client invoice configuration. For LINEA TRANSIT the agreed price formula
+// is net_kg × $0.75 — the customs declaration uses that exactly.
+interface ClientProfile {
+  consigneeBlock: string[]; // C4, C5
+  pricePerNetKg: number; // formula multiplier
+  category: string; // group label that goes in column A of the first item
+}
+
+function clientProfile(clientName: string, items: InvoiceItem[]): ClientProfile {
+  if (clientName.includes('LINEA')) {
+    // Infer a single category label from the most common TN VED group prefix.
+    const category = inferCategoryLabel(items);
+    return {
+      consigneeBlock: [
+        'ТОО "LINEA TRANSIT"  БИН: 2604 4003 9864',
+        'РК, область Жетісу, город Талдыкорган, улица Абылай хана, дом 363',
+      ],
+      pricePerNetKg: 0.75,
+      category,
+    };
+  }
+  return {
+    consigneeBlock: [clientName, ''],
+    pricePerNetKg: 0.75,
+    category: inferCategoryLabel(items),
+  };
+}
+
+function inferCategoryLabel(items: InvoiceItem[]): string {
+  if (items.length === 0) return 'ТОВАРЫ КИТАЙСКОГО ПРОИЗВОДСТВА';
+  const counts = new Map<string, number>();
+  for (const it of items) {
+    const prefix = it.tnved_code.slice(0, 2);
+    counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+  }
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
+  const groupNames: Record<string, string> = {
+    '94': 'МЕБЕЛЬ И ПРЕДМЕТЫ ИНТЕРЬЕРА',
+    '64': 'ОБУВЬ',
+    '61': 'ОДЕЖДА ТРИКОТАЖНАЯ',
+    '62': 'ОДЕЖДА ТЕКСТИЛЬНАЯ',
+    '85': 'ЭЛЕКТРОТОВАРЫ И ЭЛЕКТРОНИКА',
+    '84': 'МАШИНЫ И ОБОРУДОВАНИЕ',
+    '69': 'КЕРАМИКА И САНТЕХНИКА',
+    '73': 'ИЗДЕЛИЯ ИЗ ЧЁРНЫХ МЕТАЛЛОВ',
+    '74': 'ИЗДЕЛИЯ ИЗ МЕДИ',
+    '39': 'ПЛАСТМАССОВЫЕ ИЗДЕЛИЯ',
+    '95': 'ИГРУШКИ И СПОРТТОВАРЫ',
+    '42': 'КОЖГАЛАНТЕРЕЯ',
+  };
+  return groupNames[top] ?? 'ТОВАРЫ КИТАЙСКОГО ПРОИЗВОДСТВА';
+}
+
 async function buildXlsx(invoice: InvoiceState): Promise<string> {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'TNVED.ai bot';
   const sheetName = invoice.invoice_number?.slice(-4) ?? '0001';
   const ws = wb.addWorksheet(sheetName);
 
-  // Column widths to match the LINEA TRANSIT template.
-  const widths = [18, 50, 14, 10, 12, 12, 12, 14];
+  // Column widths match the LINEA TRANSIT template.
+  const widths = [22, 60, 14, 10, 12, 12, 12, 14];
   widths.forEach((w, i) => {
     ws.getColumn(i + 1).width = w;
   });
 
   const items = invoice.items ?? [];
-  const summary = invoice.summary;
-  const totalNet = items.reduce((s, it) => s + it.net_kg, 0);
-  const totalCost = summary?.cost_usd ?? 0;
+  const profile = clientProfile(invoice.client_name, items);
 
-  // Per-item cost = proportional share of total cost by net weight.
-  const itemCost = (it: { net_kg: number }) =>
-    totalNet > 0 ? Math.round((totalCost * it.net_kg) / totalNet * 100) / 100 : 0;
-
-  // ---------- Header section ----------
+  // ---------- Header ----------
   ws.getCell('A1').value = 'ГРУЗООТПРАВИТЕЛЬ';
   ws.getCell('A1').font = { bold: true };
   ws.getCell('C1').value = 'XINJIANG TERRITORY VERTICAL ELECTRONIC COMMERCE.,LTD';
@@ -392,14 +454,8 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
 
   ws.getCell('A4').value = 'ГРУЗОПОЛУЧАТЕЛЬ';
   ws.getCell('A4').font = { bold: true };
-
-  if (invoice.client_name.includes('LINEA')) {
-    ws.getCell('C4').value = 'ТОО "LINEA TRANSIT"  БИН: 2604 4003 9864';
-    ws.getCell('C5').value =
-      'РК, область Жетісу, город Талдыкорган, улица Абылай хана, дом 363';
-  } else {
-    ws.getCell('C4').value = invoice.client_name;
-  }
+  ws.getCell('C4').value = profile.consigneeBlock[0];
+  ws.getCell('C5').value = profile.consigneeBlock[1];
   ws.getCell('C5').alignment = { wrapText: true };
 
   const today = new Date().toLocaleDateString('ru-RU', {
@@ -420,7 +476,7 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
 
   // ---------- Table header (row 15) ----------
   const HEADER_ROW = 15;
-  const headers = [
+  const headers: Array<[string, string]> = [
     ['B', 'НАИМЕНОВАНИЕ ТОВАРА'],
     ['C', 'КОД ТН ВЭД'],
     ['D', 'КОЛИЧЕСТВО МЕСТ'],
@@ -445,20 +501,23 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
 
   // ---------- Item rows ----------
   const START_ROW = HEADER_ROW + 1;
+  const PRICE = profile.pricePerNetKg;
   items.forEach((item, idx) => {
     const r = START_ROW + idx;
     if (idx === 0) {
-      ws.getCell(`A${r}`).value = 'САНТЕХНИКА - САНИТАРНО-ТЕХНИЧЕСКОЕ ОБОРУДОВАНИЕ';
+      ws.getCell(`A${r}`).value = profile.category;
       ws.getCell(`A${r}`).alignment = { wrapText: true, vertical: 'top' };
+      ws.getCell(`A${r}`).font = { bold: true };
     }
-    ws.getCell(`B${r}`).value = item.text_translated.toUpperCase();
+    ws.getCell(`B${r}`).value = (item.text_translated || item.text_original || '').toUpperCase();
     ws.getCell(`B${r}`).alignment = { wrapText: true, vertical: 'top' };
     ws.getCell(`C${r}`).value = Number(item.tnved_code);
-    ws.getCell(`D${r}`).value = Math.max(1, Math.ceil(item.quantity / 100));
-    ws.getCell(`E${r}`).value = item.quantity;
-    ws.getCell(`F${r}`).value = item.net_kg;
-    ws.getCell(`G${r}`).value = item.gross_kg;
-    ws.getCell(`H${r}`).value = itemCost(item);
+    ws.getCell(`D${r}`).value = Math.max(1, Math.ceil((item.quantity || 1) / 1));
+    ws.getCell(`E${r}`).value = item.quantity || 0;
+    ws.getCell(`F${r}`).value = item.net_kg || 0;
+    ws.getCell(`G${r}`).value = item.gross_kg || 0;
+    // Cost = net_kg × client rate, expressed as a formula so it's editable.
+    ws.getCell(`H${r}`).value = { formula: `F${r}*${PRICE}` };
     ws.getCell(`H${r}`).numFmt = '#,##0.00';
 
     for (let c = 1; c <= 8; c++) {
@@ -471,8 +530,7 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
     }
   });
 
-  // ---------- Totals row ----------
-  let breakdownStart = HEADER_ROW + 3;
+  // ---------- ИТОГО row ----------
   if (items.length > 0) {
     const lastItemRow = START_ROW + items.length - 1;
     const totalRow = lastItemRow + 2;
@@ -492,106 +550,6 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
         right: { style: 'thin' },
       };
     }
-    breakdownStart = totalRow + 3;
-  }
-
-  // ---------- Section 2: reasoning + per-position duty breakdown ----------
-  if (items.length > 0 && summary) {
-    let r = breakdownStart;
-    ws.getCell(`A${r}`).value = 'ОБОСНОВАНИЕ ВЫБОРА КОДОВ ТН ВЭД И РАСЧЁТ ПОШЛИН';
-    ws.getCell(`A${r}`).font = { bold: true, size: 12 };
-    ws.mergeCells(`A${r}:H${r}`);
-    r += 2;
-
-    const HEADERS_2 = [
-      ['A', '#'],
-      ['B', 'Код ТН ВЭД'],
-      ['C', 'Описание'],
-      ['D', 'Обоснование'],
-      ['E', 'Стоимость $'],
-      ['F', 'Ставка'],
-      ['G', 'Пошлина $'],
-      ['H', 'НДС 16% $'],
-    ];
-    for (const [col, label] of HEADERS_2) {
-      const cell = ws.getCell(`${col}${r}`);
-      cell.value = label;
-      cell.font = { bold: true };
-      cell.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' };
-      cell.border = {
-        top: { style: 'thin' },
-        bottom: { style: 'thin' },
-        left: { style: 'thin' },
-        right: { style: 'thin' },
-      };
-    }
-    ws.getRow(r).height = 28;
-    r += 1;
-
-    const breakdownStartRow = r;
-    for (const it of items) {
-      const itemCostValue = itemCost(it);
-      const dutyValue = Math.round(itemCostValue * (it.duty_rate / 100) * 100) / 100;
-      const vatValue = Math.round((itemCostValue + dutyValue) * 0.16 * 100) / 100;
-
-      ws.getCell(`A${r}`).value = it.index;
-      ws.getCell(`B${r}`).value = Number(it.tnved_code);
-      ws.getCell(`C${r}`).value = it.tnved_description;
-      ws.getCell(`D${r}`).value = it.reasoning ?? '';
-      ws.getCell(`D${r}`).alignment = { wrapText: true, vertical: 'top' };
-      ws.getCell(`E${r}`).value = itemCostValue;
-      ws.getCell(`E${r}`).numFmt = '#,##0.00';
-      ws.getCell(`F${r}`).value = `${it.duty_rate}%`;
-      ws.getCell(`G${r}`).value = dutyValue;
-      ws.getCell(`G${r}`).numFmt = '#,##0.00';
-      ws.getCell(`H${r}`).value = vatValue;
-      ws.getCell(`H${r}`).numFmt = '#,##0.00';
-      for (let c = 1; c <= 8; c++) {
-        ws.getRow(r).getCell(c).border = {
-          top: { style: 'thin' },
-          bottom: { style: 'thin' },
-          left: { style: 'thin' },
-          right: { style: 'thin' },
-        };
-      }
-      ws.getRow(r).height = 60;
-      r += 1;
-    }
-
-    // Final payment totals block.
-    r += 1;
-    ws.getCell(`A${r}`).value = 'ВСЕГО К ОПЛАТЕ:';
-    ws.getCell(`A${r}`).font = { bold: true, size: 11 };
-    ws.mergeCells(`A${r}:H${r}`);
-    r += 1;
-
-    const totals: Array<[string, number]> = [
-      ['Стоимость товара', summary.cost_usd],
-      ['Пошлина', summary.duty_usd],
-      ['НДС 16%', summary.vat_usd],
-      ['Таможенный сбор (26 000 ₸)', summary.fee_usd],
-      ['ВСЕГО ПЛАТЕЖЕЙ', summary.total_payments_usd],
-    ];
-    for (const [label, amount] of totals) {
-      const isFinal = label === 'ВСЕГО ПЛАТЕЖЕЙ';
-      ws.getCell(`A${r}`).value = label;
-      ws.mergeCells(`A${r}:G${r}`);
-      ws.getCell(`H${r}`).value = amount;
-      ws.getCell(`H${r}`).numFmt = '$#,##0.00';
-      if (isFinal) {
-        ws.getCell(`A${r}`).font = { bold: true };
-        ws.getCell(`H${r}`).font = { bold: true };
-      }
-      ws.getCell(`A${r}`).alignment = { horizontal: 'right' };
-      ws.getRow(r).getCell(8).border = {
-        top: { style: 'thin' },
-        bottom: { style: isFinal ? 'medium' : 'thin' },
-        left: { style: 'thin' },
-        right: { style: 'thin' },
-      };
-      r += 1;
-    }
-    void breakdownStartRow;
   }
 
   const dir = join(tmpdir(), 'tnved-invoices');
@@ -676,12 +634,9 @@ export class MockApiClient implements ApiClient {
           if (useClaude) {
             const inv = await getInvoiceRow(invoiceId);
             const fileRef = inv.source_file_url ?? '';
-            const fileName = (fileRef.match(/(?:file_name=)?([^/]+\.xlsx)$/i) ?? [])[1];
-            // For now we use the original filename if stored in source_file_url
-            // suffix; fallback is whatever we can detect.
             if (fileRef.startsWith('tg:')) {
               try {
-                items = await classifyFromUploadedFile(fileRef, fileName ?? `${inv.invoice_number}.xlsx`);
+                items = await classifyFromUploadedFile(fileRef);
                 if (items && items.length > 0) source = 'file';
               } catch (err) {
                 logger.warn({ err, invoiceId }, 'real file classification failed, falling back');

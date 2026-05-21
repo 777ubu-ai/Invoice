@@ -55,11 +55,11 @@ export async function newInvoiceConversation(
   let fileUrl: string | undefined;
   if (fileMsg.message?.document) {
     fileName = fileMsg.message.document.file_name ?? fileName;
-    fileUrl = `tg-file:${fileMsg.message.document.file_id}`;
+    fileUrl = `tg:${fileMsg.message.document.file_id}`;
   } else if (fileMsg.message?.photo) {
     fileName = 'packing-list.jpg';
     const ph = fileMsg.message.photo[fileMsg.message.photo.length - 1];
-    if (ph) fileUrl = `tg-file:${ph.file_id}`;
+    if (ph) fileUrl = `tg:${ph.file_id}`;
   }
   logger.info({ fileName, fileUrl }, 'received packing list');
 

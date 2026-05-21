@@ -273,11 +273,13 @@ const REVIEWER_PROMPT = `Ты — старший таможенный броке
 
 ЗАДАЧА: оцени каждую позицию и поставь confidence (0-100), needs_review (true/false), reviewer_notes (короткий комментарий если нашёл проблему).
 
-КРИТЕРИИ:
-- Если код выглядит правильно для описания: confidence 90-100, needs_review: false.
-- Если есть неоднозначность (материал не указан, общее название "товар"/"мебель"/"配件"): confidence 60-80, needs_review: true, reviewer_notes объясни сомнения.
-- Если код ЯВНО неправильный (например, мебель отнесли к сантехнике): confidence < 60, needs_review: true, reviewer_notes объясни почему неправильно.
-- Если ставка пошлины выглядит неверной для этого кода — отметь в reviewer_notes.
+КРИТЕРИИ (важно: порог ревью — 50%):
+- Если код выглядит правильно для описания: confidence 80-100, needs_review: false.
+- Если есть лёгкая неоднозначность, но код в правильной товарной группе: confidence 50-80, needs_review: false. Можешь добавить reviewer_notes для оператора, но НЕ помечай needs_review.
+- Если код ЯВНО сомнительный или ЯВНО неправильный (например, мебель отнесли к сантехнике, или общее «配件/товар» без понимания материала): confidence < 50, needs_review: true, reviewer_notes объясни почему неправильно.
+- Если ставка пошлины выглядит неверной для этого кода — отметь в reviewer_notes, но не флагай если код всё равно в правильной группе.
+
+ВАЖНО: needs_review = true ТОЛЬКО при confidence < 50. Не флагай позиции с confidence ≥ 50.
 
 ВЫВОД — СТРОГО валидный JSON:
 {
@@ -354,18 +356,26 @@ export async function agentReviewer(items: ClassifiedItem[]): Promise<ReviewedIt
     'agent 3 reviewer done',
   );
 
+  // Hard rule: needs_review fires only below CONFIDENCE_REVIEW_THRESHOLD. Anything
+  // ≥ 50 ships without review even if the reviewer happens to flag it.
+  const CONFIDENCE_REVIEW_THRESHOLD = 50;
   const byIndex = new Map(parsed.items.map((p) => [p.index, p]));
   return items.map((it) => {
     const r = byIndex.get(it.index);
     if (!r) {
-      // Reviewer didn't return data for this item — assume ok with low confidence.
-      return { ...it, confidence: 70, needs_review: true, review_reason: 'Проверяющий не вернул оценку' };
+      return {
+        ...it,
+        confidence: 70,
+        needs_review: false,
+        reviewer_notes: 'Проверяющий не вернул оценку',
+      };
     }
+    const needs_review = r.confidence < CONFIDENCE_REVIEW_THRESHOLD;
     return {
       ...it,
       confidence: r.confidence,
-      needs_review: r.needs_review,
-      review_reason: r.needs_review ? r.reviewer_notes ?? 'Требует проверки' : undefined,
+      needs_review,
+      review_reason: needs_review ? r.reviewer_notes ?? 'Требует проверки' : undefined,
       reviewer_notes: r.reviewer_notes,
     };
   });

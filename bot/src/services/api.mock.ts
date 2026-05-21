@@ -256,6 +256,63 @@ function inferCategoryLabel(items: InvoiceItem[]): string {
   return groupNames[top] ?? 'ТОВАРЫ КИТАЙСКОГО ПРОИЗВОДСТВА';
 }
 
+// Merge items into one row per ТН ВЭД code. Customs expects an aggregated table —
+// one line per code with summed weight/qty, not 60+ near-identical rows.
+interface MergedRow {
+  tnved_code: string;
+  tnved_description: string;
+  name: string;
+  source_count: number;
+  quantity: number;
+  net_kg: number;
+  gross_kg: number;
+}
+
+function groupItemsByCode(items: InvoiceItem[]): MergedRow[] {
+  const map = new Map<string, MergedRow>();
+  const namesByCode = new Map<string, Set<string>>();
+  for (const it of items) {
+    const code = it.tnved_code;
+    const cleanName = (it.text_translated || it.text_original || '').trim();
+    const namesSet = namesByCode.get(code) ?? new Set<string>();
+    if (cleanName) namesSet.add(cleanName.toUpperCase());
+    namesByCode.set(code, namesSet);
+
+    const existing = map.get(code);
+    if (existing) {
+      existing.quantity += it.quantity || 0;
+      existing.net_kg += it.net_kg || 0;
+      existing.gross_kg += it.gross_kg || 0;
+      existing.source_count += 1;
+    } else {
+      map.set(code, {
+        tnved_code: code,
+        tnved_description: it.tnved_description,
+        name: cleanName.toUpperCase(),
+        source_count: 1,
+        quantity: it.quantity || 0,
+        net_kg: it.net_kg || 0,
+        gross_kg: it.gross_kg || 0,
+      });
+    }
+  }
+  // Use the joined set of distinct product names as the row label, capped to 3.
+  for (const [code, row] of map.entries()) {
+    const names = [...(namesByCode.get(code) ?? [])];
+    if (names.length === 0) {
+      row.name = row.tnved_description.toUpperCase();
+    } else if (names.length <= 3) {
+      row.name = names.join(', ');
+    } else {
+      row.name = `${names.slice(0, 3).join(', ')} И ДР. (${names.length} НАИМ.)`;
+    }
+    row.net_kg = Math.round(row.net_kg * 100) / 100;
+    row.gross_kg = Math.round(row.gross_kg * 100) / 100;
+  }
+  // Sort by gross weight desc so the biggest categories come first.
+  return [...map.values()].sort((a, b) => b.gross_kg - a.gross_kg);
+}
+
 async function buildXlsx(invoice: InvoiceState): Promise<string> {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'TNVED.ai bot';
@@ -326,24 +383,24 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
   }
   ws.getRow(HEADER_ROW).height = 32;
 
-  // ---------- Item rows ----------
+  // ---------- Item rows (grouped by ТН ВЭД code) ----------
+  const groupedRows = groupItemsByCode(items);
   const START_ROW = HEADER_ROW + 1;
   const PRICE = profile.pricePerNetKg;
-  items.forEach((item, idx) => {
+  groupedRows.forEach((row, idx) => {
     const r = START_ROW + idx;
     if (idx === 0) {
       ws.getCell(`A${r}`).value = profile.category;
       ws.getCell(`A${r}`).alignment = { wrapText: true, vertical: 'top' };
       ws.getCell(`A${r}`).font = { bold: true };
     }
-    ws.getCell(`B${r}`).value = (item.text_translated || item.text_original || '').toUpperCase();
+    ws.getCell(`B${r}`).value = row.name;
     ws.getCell(`B${r}`).alignment = { wrapText: true, vertical: 'top' };
-    ws.getCell(`C${r}`).value = Number(item.tnved_code);
-    ws.getCell(`D${r}`).value = Math.max(1, Math.ceil((item.quantity || 1) / 1));
-    ws.getCell(`E${r}`).value = item.quantity || 0;
-    ws.getCell(`F${r}`).value = item.net_kg || 0;
-    ws.getCell(`G${r}`).value = item.gross_kg || 0;
-    // Cost = net_kg × client rate, expressed as a formula so it's editable.
+    ws.getCell(`C${r}`).value = Number(row.tnved_code);
+    ws.getCell(`D${r}`).value = row.source_count;
+    ws.getCell(`E${r}`).value = row.quantity;
+    ws.getCell(`F${r}`).value = row.net_kg;
+    ws.getCell(`G${r}`).value = row.gross_kg;
     ws.getCell(`H${r}`).value = { formula: `F${r}*${PRICE}` };
     ws.getCell(`H${r}`).numFmt = '#,##0.00';
 
@@ -358,8 +415,8 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
   });
 
   // ---------- ИТОГО row ----------
-  if (items.length > 0) {
-    const lastItemRow = START_ROW + items.length - 1;
+  if (groupedRows.length > 0) {
+    const lastItemRow = START_ROW + groupedRows.length - 1;
     const totalRow = lastItemRow + 2;
     ws.getCell(`C${totalRow}`).value = 'ИТОГО:';
     ws.getCell(`D${totalRow}`).value = { formula: `SUM(D${START_ROW}:D${lastItemRow})` };

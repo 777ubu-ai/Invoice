@@ -151,11 +151,14 @@ export async function newInvoiceConversation(
       return;
     }
     if (inv.status === 'FAILED') {
+      const errMsg =
+        (inv.summary as unknown as { error?: string } | null)?.error ??
+        'Неизвестная ошибка классификации.';
       await ctx.api.editMessageText(
         status.chat.id,
         statusMessageId,
-        '❌ Классификация не удалась.',
-        { reply_markup: new InlineKeyboard().text('🔄 Повторить', `inv:retry:${inv.id}`) },
+        `❌ Классификация не удалась:\n\n${errMsg}`,
+        { reply_markup: new InlineKeyboard().text('🔄 Попробовать ещё раз', `inv:retry:${inv.id}`) },
       );
       return;
     }

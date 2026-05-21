@@ -5,11 +5,9 @@ import ExcelJS from 'exceljs';
 import { supabase } from './supabase.js';
 import { logger } from '../utils/logger.js';
 import {
-  classifyWithClaude,
-  extractAndClassifyFromText,
+  runClassificationPipeline,
   isClaudeEnabled,
-  type ClassifiedItem,
-  type ExtractedClassifiedItem,
+  type ReviewedItem,
 } from './classifier.js';
 import { fetchTelegramFile } from './file-fetcher.js';
 import { parseXlsxBuffer, rowsAsText } from './xlsx-parser.js';
@@ -39,19 +37,6 @@ const TNVED_CATALOG: TnvedHit[] = [
   { code: '7324900000', description: 'Сантехника из чёрных металлов', duty_rate: 10 },
 ];
 
-// Physical attributes only (article, original text, quantity, weights). Used both
-// for the hardcoded mock path and as input to the Claude classifier.
-function buildRawItems(): Array<Omit<InvoiceItem, 'tnved_code' | 'tnved_description' | 'duty_rate' | 'confidence' | 'needs_review' | 'reasoning' | 'alternatives' | 'review_reason' | 'index'>> {
-  return [
-    { article: 'WC-101', text_original: '陶瓷座便器 WC-101', text_translated: 'Унитаз фарфоровый', quantity: 120, gross_kg: 7200, net_kg: 6840 },
-    { article: 'SH-205', text_original: '不锈钢淋浴头 SH-205', text_translated: 'Лейка душевая из нержавеющей стали', quantity: 3400, gross_kg: 4080, net_kg: 3876 },
-    { article: 'PP-3-32', text_original: 'PP管件 32mm', text_translated: 'Фитинги PP 32мм', quantity: 85000, gross_kg: 8500, net_kg: 8075 },
-    { article: 'BV-1/2', text_original: '黄铜球阀 1/2', text_translated: 'Шаровой кран латунный 1/2"', quantity: 2200, gross_kg: 1980, net_kg: 1881 },
-    { article: 'EL-90', text_original: '钢制弯头 90度', text_translated: 'Отвод стальной 90°', quantity: 8500, gross_kg: 7650, net_kg: 7267 },
-    { article: 'K48-12', text_original: '金属配件 K48', text_translated: 'Металлические фитинги K48', quantity: 1920, gross_kg: 384, net_kg: 365 },
-    { article: 'M58-XX', text_original: '配件 M58', text_translated: 'Фитинг M58', quantity: 1230, gross_kg: 1386, net_kg: 1317 },
-  ];
-}
 
 // Decode a stored source_file_url of the form "tg:<file_id>?name=<encoded>".
 function parseSourceFileUrl(
@@ -69,35 +54,42 @@ function parseSourceFileUrl(
   return { fileId, fileName };
 }
 
-// Download an uploaded packing list from Telegram, parse xlsx, send to Claude
-// to both extract items AND classify them. Falls back to demo data on failure.
-async function classifyFromUploadedFile(
-  fileRef: string,
-): Promise<InvoiceItem[] | null> {
+// Download the uploaded packing list, parse xlsx, run the 3-agent pipeline.
+// Throws (with a Russian error message) on any failure — no silent fallback.
+async function classifyFromUploadedFile(fileRef: string): Promise<InvoiceItem[]> {
   const parsed = parseSourceFileUrl(fileRef);
   if (!parsed) {
-    logger.warn({ fileRef }, 'unsupported file ref format');
-    return null;
+    throw new Error('Не удалось разобрать ссылку на файл. Попробуй заново.');
   }
   const { fileId, fileName } = parsed;
-  const lower = fileName.toLowerCase();
-  if (!lower.endsWith('.xlsx')) {
-    logger.warn({ fileName }, 'only xlsx supported for real parsing — falling back to demo');
-    return null;
+  if (!fileName.toLowerCase().endsWith('.xlsx')) {
+    throw new Error(
+      `Поддерживается только формат xlsx. Получен: ${fileName || 'неизвестно'}. ` +
+        `PDF и фото будут поддержаны позже.`,
+    );
   }
 
-  const buf = await fetchTelegramFile(fileId);
-  const parsedXlsx = await parseXlsxBuffer(buf, fileName);
+  const buf = await fetchTelegramFile(fileId).catch((e) => {
+    throw new Error(`Не удалось скачать файл из Telegram: ${(e as Error).message}`);
+  });
+  const parsedXlsx = await parseXlsxBuffer(buf, fileName).catch((e) => {
+    throw new Error(`Не удалось распарсить xlsx: ${(e as Error).message}`);
+  });
   if (parsedXlsx.totalRows === 0) {
-    logger.warn({ fileName }, 'xlsx had no rows');
-    return null;
+    throw new Error('В файле нет ни одной строки с данными.');
   }
   logger.info({ fileName, rows: parsedXlsx.totalRows }, 'parsed xlsx');
 
   const fileText = rowsAsText(parsedXlsx);
-  const extracted: ExtractedClassifiedItem[] = await extractAndClassifyFromText(fileText);
+  const reviewed: ReviewedItem[] = await runClassificationPipeline(fileText, (p) => {
+    logger.info({ stage: p.stage, label: p.label }, 'pipeline progress');
+  });
 
-  return extracted.map((it, idx) => ({
+  if (reviewed.length === 0) {
+    throw new Error('Pipeline вернул 0 позиций.');
+  }
+
+  return reviewed.map((it, idx) => ({
     index: idx + 1,
     article: it.article || `ITEM-${idx + 1}`,
     text_original: it.text_original || '',
@@ -110,181 +102,12 @@ async function classifyFromUploadedFile(
     duty_rate: it.duty_rate,
     confidence: it.confidence,
     needs_review: it.needs_review,
-    review_reason: it.needs_review ? 'Низкая уверенность модели' : undefined,
+    review_reason: it.review_reason,
     reasoning: it.reasoning,
     alternatives: it.alternatives,
   }));
 }
 
-// Send raw items to Claude for TN VED classification, then merge with physical data.
-async function classifyViaClaude(): Promise<InvoiceItem[]> {
-  const raw = buildRawItems();
-  const toClassify = raw.map((it, idx) => ({
-    index: idx + 1,
-    article: it.article,
-    text_original: it.text_original,
-    quantity: it.quantity,
-    gross_kg: it.gross_kg,
-  }));
-
-  const classifications: ClassifiedItem[] = await classifyWithClaude(toClassify);
-  const byIndex = new Map(classifications.map((c) => [c.index, c]));
-
-  return raw.map((phys, idx) => {
-    const index = idx + 1;
-    const c = byIndex.get(index);
-    if (!c) {
-      logger.warn({ index }, 'no classification from Claude — using fallback code');
-      return {
-        ...phys,
-        index,
-        tnved_code: '0000000000',
-        tnved_description: 'Не классифицировано',
-        duty_rate: 0,
-        confidence: 0,
-        needs_review: true,
-        review_reason: 'Claude не вернул классификацию',
-        reasoning: 'Не удалось получить классификацию от модели',
-        alternatives: [],
-      };
-    }
-    return {
-      ...phys,
-      index,
-      tnved_code: c.tnved_code,
-      tnved_description: c.tnved_description,
-      duty_rate: c.duty_rate,
-      confidence: c.confidence,
-      needs_review: c.needs_review,
-      review_reason: c.needs_review ? 'Низкая уверенность модели' : undefined,
-      reasoning: c.reasoning,
-      alternatives: c.alternatives,
-    };
-  });
-}
-
-// Canned items mirror the example from TZ section 4.2 (67 items condensed to 7 codes).
-function buildCannedItems(): InvoiceItem[] {
-  const base: Omit<InvoiceItem, 'index'>[] = [
-    {
-      article: 'WC-101',
-      text_original: '陶瓷座便器 WC-101',
-      text_translated: 'Унитаз фарфоровый',
-      quantity: 120,
-      gross_kg: 7200,
-      net_kg: 6840,
-      tnved_code: '6910100000',
-      tnved_description: 'Сантехника фарфоровая',
-      duty_rate: 12,
-      confidence: 96,
-      needs_review: false,
-      reasoning:
-        'Артикул WC (water closet) + 座便器 = унитаз. Материал по описанию — фарфор (陶瓷). Группа 6910 «Раковины, ванны, унитазы и прочие санитарно-технические изделия из керамики». Ставка 12%.',
-    },
-    {
-      article: 'SH-205',
-      text_original: '不锈钢淋浴头 SH-205',
-      text_translated: 'Лейка душевая из нержавеющей стали',
-      quantity: 3400,
-      gross_kg: 4080,
-      net_kg: 3876,
-      tnved_code: '7324900000',
-      tnved_description: 'Сантехника из чёрных металлов',
-      duty_rate: 10,
-      confidence: 92,
-      needs_review: false,
-      reasoning:
-        'Артикул SH (shower) + 淋浴头 = душевая лейка. Материал 不锈钢 — нержавеющая сталь (чёрный металл). Группа 7324 «Изделия санитарно-технические из чёрных металлов». Ставка 10%.',
-    },
-    {
-      article: 'PP-3-32',
-      text_original: 'PP管件 32mm',
-      text_translated: 'Фитинги PP 32мм',
-      quantity: 85000,
-      gross_kg: 8500,
-      net_kg: 8075,
-      tnved_code: '3917400000',
-      tnved_description: 'Фитинги пластиковые',
-      duty_rate: 6.5,
-      confidence: 94,
-      needs_review: false,
-      reasoning:
-        'PP = полипропилен (пластмасса), 管件 = фитинги. Группа 3917 «Трубы, фитинги из пластмасс», подгруппа 3917 40 — фитинги. Ставка 6,5%.',
-    },
-    {
-      article: 'BV-1/2',
-      text_original: '黄铜球阀 1/2',
-      text_translated: 'Шаровой кран латунный 1/2"',
-      quantity: 2200,
-      gross_kg: 1980,
-      net_kg: 1881,
-      tnved_code: '8481808199',
-      tnved_description: 'Краны латунные',
-      duty_rate: 5,
-      confidence: 89,
-      needs_review: false,
-      reasoning:
-        'BV = ball valve (шаровой кран), 球阀 = шаровой кран. Материал 黄铜 — латунь. Группа 8481 «Краны, клапаны, вентили», подгруппа 8481 80 — прочие. Ставка 5%.',
-    },
-    {
-      article: 'EL-90',
-      text_original: '钢制弯头 90度',
-      text_translated: 'Отвод стальной 90°',
-      quantity: 8500,
-      gross_kg: 7650,
-      net_kg: 7267,
-      tnved_code: '7307990000',
-      tnved_description: 'Прочие фитинги из чёрных металлов',
-      duty_rate: 5,
-      confidence: 91,
-      needs_review: false,
-      reasoning:
-        'EL = elbow (отвод), 弯头 90度 = угол 90°. Материал 钢制 — сталь (чёрный металл). Группа 7307 «Фитинги для труб из чёрных металлов», подгруппа 7307 99 — прочие. Ставка 5%.',
-    },
-    {
-      article: 'K48-12',
-      text_original: '金属配件 K48',
-      text_translated: 'Металлические фитинги K48',
-      quantity: 1920,
-      gross_kg: 384,
-      net_kg: 365,
-      tnved_code: '7412200000',
-      tnved_description: 'Фитинги для труб из медных сплавов',
-      duty_rate: 3,
-      confidence: 65,
-      needs_review: true,
-      review_reason: 'Низкая уверенность: материал явно не указан в описании',
-      reasoning:
-        '金属配件 = металлический фитинг, конкретный сплав не уточнён. Артикул K48 не даёт явного признака. Предварительно отнесено к меди (7412 20). Требуется проверка спецификации поставщика.',
-      alternatives: [
-        { code: '7412200000', description: 'Фитинги из медных сплавов (3%)' },
-        { code: '7415310000', description: 'Гайки, шурупы из меди (5%)' },
-        { code: '8481808199', description: 'Краны латунные (5%)' },
-      ],
-    },
-    {
-      article: 'M58-XX',
-      text_original: '配件 M58',
-      text_translated: 'Фитинг M58',
-      quantity: 1230,
-      gross_kg: 1386,
-      net_kg: 1317,
-      tnved_code: '7307990000',
-      tnved_description: 'Прочие фитинги из чёрных металлов',
-      duty_rate: 5,
-      confidence: 72,
-      needs_review: true,
-      review_reason: 'Фото нечёткое, материал не идентифицирован',
-      reasoning:
-        '配件 = фитинг (общее), маркировка M58-XX без явного материала. По упаковке и весу — предположительно чёрный металл, 7307 99. Уверенность 72% — рекомендуется уточнить у поставщика.',
-      alternatives: [
-        { code: '7307990000', description: 'Прочие фитинги из чёрных металлов (5%)' },
-        { code: '7412200000', description: 'Фитинги из медных сплавов (3%)' },
-      ],
-    },
-  ];
-  return base.map((item, idx) => ({ ...item, index: idx + 1 }));
-}
 
 function computeSummary(
   items: InvoiceItem[],
@@ -620,60 +443,42 @@ export class MockApiClient implements ApiClient {
     });
 
     const useClaude = isClaudeEnabled();
-    // Real file parsing + classification needs no artificial delay — Claude
-    // takes ~10-20s on its own. Without Claude, simulate the 8s wait.
-    const delay = useClaude ? 0 : CLASSIFICATION_DELAY_MS;
-
-    setTimeout(() => {
+    // Run the pipeline asynchronously — Claude calls take 30-90s for a full
+    // packing list (3 agent passes).
+    setImmediate(() => {
       void (async () => {
-        let source: 'file' | 'mock-claude' | 'canned' = 'canned';
         try {
-          let items: InvoiceItem[] | null = null;
-
-          // 1) Try real file flow: download from Telegram, parse xlsx, send to Claude.
-          if (useClaude) {
-            const inv = await getInvoiceRow(invoiceId);
-            const fileRef = inv.source_file_url ?? '';
-            if (fileRef.startsWith('tg:')) {
-              try {
-                items = await classifyFromUploadedFile(fileRef);
-                if (items && items.length > 0) source = 'file';
-              } catch (err) {
-                logger.warn({ err, invoiceId }, 'real file classification failed, falling back');
-              }
-            }
+          if (!useClaude) {
+            throw new Error(
+              'Не настроен ANTHROPIC_API_KEY — реальная классификация невозможна. ' +
+                'Свяжись с администратором.',
+            );
+          }
+          const inv = await getInvoiceRow(invoiceId);
+          const fileRef = inv.source_file_url ?? '';
+          if (!fileRef.startsWith('tg:')) {
+            throw new Error('Файл packing list не привязан к инвойсу. Попробуй /new заново.');
           }
 
-          // 2) Fallback: canned items classified by Claude (if key set) or canned static
-          if (!items || items.length === 0) {
-            items = useClaude ? await classifyViaClaude() : buildCannedItems();
-            source = useClaude ? 'mock-claude' : 'canned';
-          }
-
+          const items = await classifyFromUploadedFile(fileRef);
           const summary = computeSummary(items, mode, value);
           await setInvoiceFields(invoiceId, {
             status: 'REVIEW' as InvoiceStatus,
             items,
             summary,
           });
-          logger.info({ invoiceId, source, count: items.length }, 'classification done');
+          logger.info({ invoiceId, count: items.length }, 'pipeline classification done');
         } catch (err) {
-          logger.error({ err, invoiceId }, 'classification failed');
-          try {
-            const items = buildCannedItems();
-            const summary = computeSummary(items, mode, value);
-            await setInvoiceFields(invoiceId, {
-              status: 'REVIEW' as InvoiceStatus,
-              items,
-              summary,
-            });
-            logger.warn({ invoiceId }, 'fell back to canned data after error');
-          } catch (_innerErr) {
-            await setInvoiceFields(invoiceId, { status: 'FAILED' as InvoiceStatus }).catch(() => {});
-          }
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error({ err, invoiceId, msg }, 'pipeline failed');
+          await setInvoiceFields(invoiceId, {
+            status: 'FAILED' as InvoiceStatus,
+            // Stash the error message in summary so the bot can show it.
+            summary: { error: msg } as unknown as InvoiceState['summary'],
+          }).catch(() => {});
         }
       })();
-    }, delay);
+    });
   }
 
   async getInvoice(invoiceId: string): Promise<InvoiceState> {

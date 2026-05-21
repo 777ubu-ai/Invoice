@@ -2,268 +2,396 @@ import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 
-const SYSTEM_PROMPT = `Ты — эксперт по таможенной классификации товаров для импорта в Казахстан (ТН ВЭД ЕАЭС).
+// =============================================================================
+// Multi-agent classification pipeline.
+//
+//   Файл xlsx → [Агент 1: Переводчик] → переведённые позиции
+//                                    ↓
+//                       [Агент 2: Классификатор] → коды ТН ВЭД + ставки
+//                                    ↓
+//                       [Агент 3: Проверяющий] → проверка, флаги ревью
+//
+// Каждый этап — отдельный вызов Claude с узким фокусом. Если этап падает —
+// pipeline бросает ошибку с указанием на каком этапе, чтобы можно было
+// показать понятное сообщение оператору.
+// =============================================================================
 
-Для каждой позиции packing list определи:
-- tnved_code: 10-значный код ТН ВЭД ЕАЭС
-- tnved_description: описание товарной группы из ТН ВЭД на русском (короткое)
-- duty_rate: ставка таможенной пошлины в процентах (число)
-- confidence: уверенность 0-100
-- needs_review: true если confidence < 80
-- reasoning: обоснование выбора кода на русском, 2-3 предложения. Объясни как ты понял что это за товар (артикул, иероглифы, описание) и почему отнёс к этой группе ТН ВЭД.
-- alternatives: 2-3 альтернативных кода с описанием для рассмотрения оператором
-
-Опорные группы для сантехники и фитингов:
-- 6910 — изделия санитарно-гигиенические из керамики (фарфор), ставка ~12%
-- 7307 — фитинги для труб из чёрных металлов, ~5%
-- 7324 — изделия санитарно-технические из чёрных металлов, ~10%
-- 7412 — фитинги для труб из меди и медных сплавов, ~3%
-- 7415 — гайки, болты, шурупы из меди, ~5%
-- 3917 — трубы и фитинги из пластмасс, ~6.5%
-- 8481 — краны, клапаны, вентили, ~5%
-
-Распознавай китайские иероглифы:
-- 陶瓷 = керамика/фарфор
-- 不锈钢 = нержавеющая сталь
-- 黄铜 = латунь
-- 钢制 = стальной
-- 球阀 = шаровой кран
-- 弯头 = отвод
-- 配件 = фитинг
-- 管件 = фитинги для труб
-
-Будь критичен: если описание абстрактное (просто "金属配件" = "металлический фитинг" без указания материала), занижай confidence до 60-75% и помечай needs_review.
-
-Возвращай СТРОГО валидный JSON по схеме output_config.`;
-
-export interface ItemToClassify {
+export interface RawItem {
   index: number;
   article: string;
   text_original: string;
-  quantity: number;
-  gross_kg: number;
-}
-
-export interface ClassifiedItem {
-  index: number;
-  tnved_code: string;
-  tnved_description: string;
-  duty_rate: number;
-  confidence: number;
-  needs_review: boolean;
-  reasoning: string;
-  alternatives: { code: string; description: string }[];
-}
-
-// Used when we have a full packing-list file (xlsx text dump) and want Claude
-// to both extract items AND classify them in one pass.
-export interface ExtractedClassifiedItem extends ClassifiedItem {
-  article: string;
-  text_original: string;
-  text_translated: string;
   quantity: number;
   gross_kg: number;
   net_kg: number;
 }
 
-const FILE_SYSTEM_PROMPT = `Ты — эксперт по таможенной классификации товаров для импорта в Казахстан (ТН ВЭД ЕАЭС) и парсер packing list от китайских поставщиков.
+export interface TranslatedItem extends RawItem {
+  text_translated: string;
+}
 
-Тебе дают текстовое представление xlsx-файла (строки и колонки в формате "R{N}: c1 | c2 | ..."). Структура колонок заранее НЕ известна — ты сам определяешь.
+export interface ClassifiedItem extends TranslatedItem {
+  tnved_code: string;
+  tnved_description: string;
+  duty_rate: number;
+  reasoning: string;
+  alternatives: { code: string; description: string }[];
+}
 
-ЗАДАЧИ:
-1. Найди строку-заголовок (часто R1 или R2-R5). Определи какие колонки содержат:
-   - Артикул / номер позиции (часто 序号, No., Article, 货号)
-   - Наименование товара (часто 品名, 名称, Name, Description, 中文名称)
-   - Количество штук (часто 数量, Qty, PCS)
-   - Вес брутто, кг (часто 毛重, Gross Weight, G.W.)
-   - Вес нетто, кг (часто 净重, Net Weight, N.W.)
-   - Количество мест (часто 件数, 箱数, Packages, CTN)
-
-2. Извлеки данные построчно. Пропусти заголовки, итоговые строки (ИТОГО / TOTAL / 合计), пустые.
-
-3. Если веса нетто нет — net_kg = gross_kg * 0.95.
-   Если веса брутто нет — gross_kg = net_kg / 0.95.
-   Если ни того ни другого — оставь 0.
-
-4. Для каждой позиции присвой 10-значный код ТН ВЭД ЕАЭС с обоснованием на русском.
-
-Распознавай китайские иероглифы и контекст:
-- 家具 = мебель (группа 9403)
-- 木 = деревянный
-- 金属 = металл / 不锈钢 = нержавейка / 黄铜 = латунь / 钢制 = сталь
-- 陶瓷 = керамика / 玻璃 = стекло / 塑料 PP = пластик
-- 球阀 = кран, 弯头 = отвод, 配件/管件 = фитинги
-- 服装 = одежда, 鞋 = обувь, 电子 = электроника
-
-Основные группы ТН ВЭД ЕАЭС для импорта из Китая в Казахстан:
-- 9403 — мебель прочая, ставка ~15%
-- 9401 — мебель для сидения, ~15%
-- 6910 — сантехника фарфоровая, ~12%
-- 7307 — фитинги стальные, ~5%
-- 7324 — сантехника стальная, ~10%
-- 7412 — фитинги медные, ~3%
-- 3917 — фитинги пластиковые, ~6.5%
-- 8481 — краны / клапаны, ~5%
-- 6109 — футболки трикотажные, ~12%
-- 8517 — телефоны / коммуникационное оборудование, ~0-5%
-- 8528 — мониторы / телевизоры, ~5-10%
-- 6402 — обувь с резиновой подошвой, ~15%
-
-Будь критичен: confidence < 80% если описание неоднозначное (нет указания материала, размытое название), помечай needs_review: true.
-
-ВЫВОД — СТРОГО валидный JSON, без markdown-блоков, без преамбулы:
-{
-  "items": [
-    {
-      "index": 1,
-      "article": "артикул из файла или сгенерированный",
-      "text_original": "оригинал из строки",
-      "text_translated": "русский перевод",
-      "quantity": 100,
-      "gross_kg": 200,
-      "net_kg": 190,
-      "tnved_code": "9403600009",
-      "tnved_description": "Мебель деревянная прочая",
-      "duty_rate": 15,
-      "confidence": 92,
-      "needs_review": false,
-      "reasoning": "В описании 家具 (мебель) + материал 木 (дерево). Группа 9403 60 — мебель деревянная прочая.",
-      "alternatives": [{"code": "...", "description": "..."}]
-    }
-  ]
-}`;
+export interface ReviewedItem extends ClassifiedItem {
+  confidence: number;
+  needs_review: boolean;
+  review_reason?: string;
+  reviewer_notes?: string;
+}
 
 export function isClaudeEnabled(): boolean {
   return Boolean(env.ANTHROPIC_API_KEY);
 }
 
-export async function classifyWithClaude(
-  items: ItemToClassify[],
-): Promise<ClassifiedItem[]> {
+function client(): Anthropic {
   const apiKey = env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY is not configured');
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not configured');
+  return new Anthropic({ apiKey });
+}
+
+function extractJson<T>(text: string): T {
+  const raw = text.trim();
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start < 0 || end < 0) {
+    throw new Error(`No JSON object in response: ${raw.slice(0, 300)}`);
   }
+  return JSON.parse(raw.slice(start, end + 1)) as T;
+}
 
-  const client = new Anthropic({ apiKey });
+// -----------------------------------------------------------------------------
+// АГЕНТ 1 — ПЕРЕВОДЧИК / ЭКСТРАКТОР
+// -----------------------------------------------------------------------------
+const TRANSLATOR_PROMPT = `Ты — переводчик packing list с китайского на русский.
 
-  const itemsList = items
-    .map(
-      (it) =>
-        `${it.index}. Артикул: ${it.article}\n   Текст: ${it.text_original}\n   Количество: ${it.quantity} шт, брутто: ${it.gross_kg} кг`,
-    )
-    .join('\n\n');
+ВХОД: текстовое представление xlsx-файла. Структура колонок заранее НЕ известна.
 
+ЗАДАЧИ (только эти, ничего лишнего):
+1. Определи где заголовок таблицы (часто R1-R5).
+2. Найди колонки: артикул, наименование товара (китайский/английский), количество мест/штук, вес брутто (кг), вес нетто (кг).
+3. Извлеки каждую товарную позицию. Пропусти заголовки, итоговые строки (ИТОГО/TOTAL/合计), пустые.
+4. Переведи название на русский. Если оригинал на нескольких языках (китайский+английский+русский) — используй существующий русский перевод если он чёткий, иначе сам переведи с китайского.
+
+ВАЖНО — точность данных:
+- Если кол-во штук явно НЕ указано — поставь quantity: 0 (НЕ выдумывай).
+- Если веса нетто нет, но есть брутто — net_kg = gross_kg * 0.95.
+- Если веса брутто нет, но есть нетто — gross_kg = net_kg / 0.95.
+- Если артикула нет — сгенерируй короткий код ITEM-N.
+
+НЕ ПЫТАЙСЯ классифицировать по ТН ВЭД на этом этапе. Это сделает другой агент.
+
+ВЫВОД — СТРОГО валидный JSON, без markdown, без преамбулы:
+{
+  "items": [
+    {
+      "index": 1,
+      "article": "...",
+      "text_original": "оригинал из файла",
+      "text_translated": "русский перевод",
+      "quantity": 100,
+      "gross_kg": 200,
+      "net_kg": 190
+    }
+  ]
+}`;
+
+export async function agentTranslator(fileText: string): Promise<TranslatedItem[]> {
   const t0 = Date.now();
-  const response = await client.messages.create({
+  const c = client();
+  const response = await c.messages.create({
     model: 'claude-opus-4-7',
-    max_tokens: 8000,
+    max_tokens: 12000,
     system: [
-      {
-        type: 'text',
-        text: SYSTEM_PROMPT,
-        cache_control: { type: 'ephemeral' },
-      },
+      { type: 'text', text: TRANSLATOR_PROMPT, cache_control: { type: 'ephemeral' } },
     ],
     messages: [
       {
         role: 'user',
-        content:
-          `Классифицируй следующие позиции packing list. Верни СТРОГО валидный JSON, без markdown-блоков, без преамбулы:\n\n${itemsList}\n\n` +
-          `Формат ответа:\n` +
-          `{"items":[{"index":1,"tnved_code":"...","tnved_description":"...","duty_rate":12,"confidence":95,"needs_review":false,"reasoning":"...","alternatives":[{"code":"...","description":"..."}]}]}`,
+        content: `Извлеки и переведи позиции из этого packing list:\n\n${fileText}`,
       },
     ],
   });
 
-  const ms = Date.now() - t0;
-  logger.info(
-    {
-      ms,
-      input_tokens: response.usage.input_tokens,
-      output_tokens: response.usage.output_tokens,
-      cache_read: response.usage.cache_read_input_tokens,
-      cache_create: response.usage.cache_creation_input_tokens,
-      items: items.length,
-    },
-    'claude classification complete',
-  );
-
   const textBlock = response.content.find((b) => b.type === 'text');
   if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('No text in Claude response');
+    throw new Error('Агент 1 (Переводчик): пустой ответ');
   }
-
-  // Strip any markdown fencing Claude might add despite instructions.
-  const raw = textBlock.text.trim();
-  const jsonStart = raw.indexOf('{');
-  const jsonEnd = raw.lastIndexOf('}');
-  if (jsonStart < 0 || jsonEnd < 0) {
-    throw new Error(`Could not locate JSON object in response: ${raw.slice(0, 200)}`);
+  const parsed = extractJson<{ items: TranslatedItem[] }>(textBlock.text);
+  logger.info(
+    {
+      ms: Date.now() - t0,
+      items: parsed.items.length,
+      input_tokens: response.usage.input_tokens,
+      output_tokens: response.usage.output_tokens,
+    },
+    'agent 1 translator done',
+  );
+  if (!Array.isArray(parsed.items) || parsed.items.length === 0) {
+    throw new Error('Агент 1 (Переводчик): не нашёл ни одной товарной позиции в файле');
   }
-  const jsonText = raw.slice(jsonStart, jsonEnd + 1);
-
-  const parsed = JSON.parse(jsonText) as { items: ClassifiedItem[] };
-  return parsed.items;
+  return parsed.items.map((it, idx) => ({ ...it, index: idx + 1 }));
 }
 
-// One-shot: send raw text dump of an xlsx file and let Claude both extract
-// items AND classify them. Use this when we have a real uploaded packing list.
-export async function extractAndClassifyFromText(
-  fileText: string,
-): Promise<ExtractedClassifiedItem[]> {
-  const apiKey = env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY is not configured');
-  }
+// -----------------------------------------------------------------------------
+// АГЕНТ 2 — КЛАССИФИКАТОР ТН ВЭД
+// -----------------------------------------------------------------------------
+const CLASSIFIER_PROMPT = `Ты — таможенный брокер РК с экспертизой по ТН ВЭД ЕАЭС.
 
-  const client = new Anthropic({ apiKey });
+ВХОД: список товарных позиций с переводом (наименование, количество, вес).
 
+ЗАДАЧА: для каждой позиции присвоить 10-значный код ТН ВЭД ЕАЭС, описание группы, ставку таможенной пошлины (%), и обоснование выбора кода.
+
+ПРАВИЛА:
+- Используй точные 10-значные коды ТН ВЭД (без сокращений).
+- Ставка пошлины — действующая в РК на 2026 г.
+- Обоснование на русском, 1-2 предложения: что в товаре главное (материал, назначение) и почему именно эта группа.
+- Для каждой позиции дай 2-3 альтернативных кода для возможного ревью оператором.
+
+Опорные группы (не исчерпывающий список):
+- 9401 — мебель для сидения (стулья, кресла, диваны), ~15%
+- 9403 — мебель прочая (столы, шкафы, кровати), ~15%
+- 9404 — матрасы, постельные принадлежности, ~12%
+- 6910 — сантехника фарфоровая, ~12%
+- 7324 — сантехника стальная, ~10%
+- 7307/7412/3917 — фитинги (сталь/медь/пластик), 3-6.5%
+- 8481 — краны/клапаны, ~5%
+- 6109/6110 — одежда трикотажная, ~12-15%
+- 8517 — телефоны, ~0-5%
+- 8528 — мониторы/ТВ, ~5-10%
+- 6402/6403 — обувь, ~15-20%
+- 6907 — плитка керамическая, ~15%
+
+ВЫВОД — СТРОГО валидный JSON:
+{
+  "items": [
+    {
+      "index": 1,
+      "tnved_code": "9403600009",
+      "tnved_description": "Мебель деревянная прочая",
+      "duty_rate": 15,
+      "reasoning": "Артикул и описание указывают на мебель из дерева. Группа 9403 60 — мебель деревянная прочая. Ставка 15%.",
+      "alternatives": [
+        {"code": "9403200009", "description": "Мебель металлическая прочая"},
+        {"code": "9401710009", "description": "Сиденья с металлическим каркасом"}
+      ]
+    }
+  ]
+}
+
+Только items в указанном порядке index. Не меняй порядок входных позиций.`;
+
+export async function agentClassifier(items: TranslatedItem[]): Promise<ClassifiedItem[]> {
   const t0 = Date.now();
-  const response = await client.messages.create({
+  const c = client();
+
+  const inputJson = JSON.stringify(
+    items.map((it) => ({
+      index: it.index,
+      article: it.article,
+      text_original: it.text_original,
+      text_translated: it.text_translated,
+      quantity: it.quantity,
+      gross_kg: it.gross_kg,
+    })),
+  );
+
+  const response = await c.messages.create({
     model: 'claude-opus-4-7',
     max_tokens: 16000,
     system: [
-      {
-        type: 'text',
-        text: FILE_SYSTEM_PROMPT,
-        cache_control: { type: 'ephemeral' },
-      },
+      { type: 'text', text: CLASSIFIER_PROMPT, cache_control: { type: 'ephemeral' } },
     ],
     messages: [
       {
         role: 'user',
-        content:
-          `Вот текстовое представление packing list. Извлеки позиции и классифицируй каждую по ТН ВЭД. Верни JSON по схеме из system prompt.\n\n` +
-          fileText,
+        content: `Классифицируй эти позиции по ТН ВЭД ЕАЭС:\n\n${inputJson}`,
       },
     ],
   });
 
-  const ms = Date.now() - t0;
+  const textBlock = response.content.find((b) => b.type === 'text');
+  if (!textBlock || textBlock.type !== 'text') {
+    throw new Error('Агент 2 (Классификатор): пустой ответ');
+  }
+  const parsed = extractJson<{
+    items: Array<{
+      index: number;
+      tnved_code: string;
+      tnved_description: string;
+      duty_rate: number;
+      reasoning: string;
+      alternatives: { code: string; description: string }[];
+    }>;
+  }>(textBlock.text);
+
   logger.info(
     {
-      ms,
+      ms: Date.now() - t0,
+      items: parsed.items.length,
       input_tokens: response.usage.input_tokens,
       output_tokens: response.usage.output_tokens,
-      cache_read: response.usage.cache_read_input_tokens,
-      cache_create: response.usage.cache_creation_input_tokens,
     },
-    'claude extract+classify complete',
+    'agent 2 classifier done',
   );
+
+  if (!Array.isArray(parsed.items) || parsed.items.length !== items.length) {
+    throw new Error(
+      `Агент 2 (Классификатор): количество позиций не совпадает (вход ${items.length}, выход ${
+        parsed.items?.length ?? 0
+      })`,
+    );
+  }
+
+  const byIndex = new Map(parsed.items.map((p) => [p.index, p]));
+  return items.map((it) => {
+    const c2 = byIndex.get(it.index);
+    if (!c2) {
+      throw new Error(`Агент 2 (Классификатор): пропущена позиция ${it.index}`);
+    }
+    return {
+      ...it,
+      tnved_code: c2.tnved_code,
+      tnved_description: c2.tnved_description,
+      duty_rate: c2.duty_rate,
+      reasoning: c2.reasoning,
+      alternatives: c2.alternatives ?? [],
+    };
+  });
+}
+
+// -----------------------------------------------------------------------------
+// АГЕНТ 3 — ПРОВЕРЯЮЩИЙ
+// -----------------------------------------------------------------------------
+const REVIEWER_PROMPT = `Ты — старший таможенный брокер, который проверяет работу младшего классификатора.
+
+ВХОД: список позиций с присвоенными кодами ТН ВЭД и обоснованиями.
+
+ЗАДАЧА: оцени каждую позицию и поставь confidence (0-100), needs_review (true/false), reviewer_notes (короткий комментарий если нашёл проблему).
+
+КРИТЕРИИ:
+- Если код выглядит правильно для описания: confidence 90-100, needs_review: false.
+- Если есть неоднозначность (материал не указан, общее название "товар"/"мебель"/"配件"): confidence 60-80, needs_review: true, reviewer_notes объясни сомнения.
+- Если код ЯВНО неправильный (например, мебель отнесли к сантехнике): confidence < 60, needs_review: true, reviewer_notes объясни почему неправильно.
+- Если ставка пошлины выглядит неверной для этого кода — отметь в reviewer_notes.
+
+ВЫВОД — СТРОГО валидный JSON:
+{
+  "items": [
+    {
+      "index": 1,
+      "confidence": 95,
+      "needs_review": false
+    },
+    {
+      "index": 2,
+      "confidence": 65,
+      "needs_review": true,
+      "reviewer_notes": "Описание '配件' слишком общее. Может быть фитинг стальной (7307), медный (7412) или пластиковый (3917). Уточни материал у поставщика."
+    }
+  ]
+}
+
+Только items, тот же порядок index. Не меняй структуру.`;
+
+export async function agentReviewer(items: ClassifiedItem[]): Promise<ReviewedItem[]> {
+  const t0 = Date.now();
+  const c = client();
+
+  const inputJson = JSON.stringify(
+    items.map((it) => ({
+      index: it.index,
+      text_original: it.text_original,
+      text_translated: it.text_translated,
+      quantity: it.quantity,
+      gross_kg: it.gross_kg,
+      tnved_code: it.tnved_code,
+      tnved_description: it.tnved_description,
+      duty_rate: it.duty_rate,
+      reasoning: it.reasoning,
+    })),
+  );
+
+  const response = await c.messages.create({
+    model: 'claude-opus-4-7',
+    max_tokens: 8000,
+    system: [
+      { type: 'text', text: REVIEWER_PROMPT, cache_control: { type: 'ephemeral' } },
+    ],
+    messages: [
+      {
+        role: 'user',
+        content: `Проверь работу классификатора:\n\n${inputJson}`,
+      },
+    ],
+  });
 
   const textBlock = response.content.find((b) => b.type === 'text');
   if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('No text in Claude response');
+    throw new Error('Агент 3 (Проверяющий): пустой ответ');
   }
+  const parsed = extractJson<{
+    items: Array<{
+      index: number;
+      confidence: number;
+      needs_review: boolean;
+      reviewer_notes?: string;
+    }>;
+  }>(textBlock.text);
 
-  const raw = textBlock.text.trim();
-  const jsonStart = raw.indexOf('{');
-  const jsonEnd = raw.lastIndexOf('}');
-  if (jsonStart < 0 || jsonEnd < 0) {
-    throw new Error(`Could not locate JSON object in response: ${raw.slice(0, 200)}`);
-  }
-  const jsonText = raw.slice(jsonStart, jsonEnd + 1);
-  const parsed = JSON.parse(jsonText) as { items: ExtractedClassifiedItem[] };
-  return parsed.items;
+  logger.info(
+    {
+      ms: Date.now() - t0,
+      items: parsed.items.length,
+      flagged: parsed.items.filter((i) => i.needs_review).length,
+      input_tokens: response.usage.input_tokens,
+      output_tokens: response.usage.output_tokens,
+    },
+    'agent 3 reviewer done',
+  );
+
+  const byIndex = new Map(parsed.items.map((p) => [p.index, p]));
+  return items.map((it) => {
+    const r = byIndex.get(it.index);
+    if (!r) {
+      // Reviewer didn't return data for this item — assume ok with low confidence.
+      return { ...it, confidence: 70, needs_review: true, review_reason: 'Проверяющий не вернул оценку' };
+    }
+    return {
+      ...it,
+      confidence: r.confidence,
+      needs_review: r.needs_review,
+      review_reason: r.needs_review ? r.reviewer_notes ?? 'Требует проверки' : undefined,
+      reviewer_notes: r.reviewer_notes,
+    };
+  });
+}
+
+// -----------------------------------------------------------------------------
+// ПОЛНЫЙ PIPELINE
+// -----------------------------------------------------------------------------
+
+export interface PipelineProgress {
+  stage: 1 | 2 | 3;
+  label: string;
+}
+
+export async function runClassificationPipeline(
+  fileText: string,
+  onProgress?: (p: PipelineProgress) => void | Promise<void>,
+): Promise<ReviewedItem[]> {
+  onProgress?.({ stage: 1, label: 'Агент 1: перевод и извлечение позиций...' });
+  const translated = await agentTranslator(fileText);
+
+  onProgress?.({ stage: 2, label: `Агент 2: подбор кодов ТН ВЭД (${translated.length} поз.)...` });
+  const classified = await agentClassifier(translated);
+
+  onProgress?.({ stage: 3, label: 'Агент 3: проверка работы классификатора...' });
+  const reviewed = await agentReviewer(classified);
+
+  return reviewed;
 }

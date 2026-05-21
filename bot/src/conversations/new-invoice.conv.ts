@@ -133,12 +133,15 @@ export async function newInvoiceConversation(
     payload: { mode, value },
   });
 
-  const status = await ctx.reply('🔄 Запускаю классификатор...\n⏳ Это займёт 2-3 минуты');
+  const status = await ctx.reply('🔄 Запускаю классификатор...\n⏳ Это займёт 3-5 минут (3 агента + проверка)');
   const statusMessageId = status.message_id;
 
-  // 7. Poll until REVIEW / FAILED.
-  for (let attempt = 0; attempt < 40; attempt++) {
-    await conversation.sleep(3000);
+  // 7. Poll until REVIEW / FAILED. Pipeline = translator (~45s) + classifier (~2 min) + reviewer (~50s),
+  //    plus jitter on long files. Give it 8 minutes total.
+  const POLL_INTERVAL_SEC = 5;
+  const MAX_ATTEMPTS = 96; // 96 * 5 = 480 s = 8 min
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    await conversation.sleep(POLL_INTERVAL_SEC * 1000);
     const inv = await api.getInvoice(upload.invoiceId);
     if (inv.status === 'REVIEW') {
       await ctx.api.editMessageText(
@@ -162,11 +165,18 @@ export async function newInvoiceConversation(
       );
       return;
     }
-    if (attempt > 0 && attempt % 3 === 0) {
+    if (attempt > 0 && attempt % 6 === 0) {
+      const elapsedSec = attempt * POLL_INTERVAL_SEC;
+      const stageHint =
+        elapsedSec < 60
+          ? 'агент 1 (перевод)'
+          : elapsedSec < 200
+            ? 'агент 2 (коды ТН ВЭД)'
+            : 'агент 3 (ревью)';
       await ctx.api.editMessageText(
         status.chat.id,
         statusMessageId,
-        `🔄 Классификация... (${attempt * 3} сек)`,
+        `🔄 Классификация: ${stageHint}... (${elapsedSec} сек)`,
       );
     }
   }
@@ -174,7 +184,7 @@ export async function newInvoiceConversation(
   await ctx.api.editMessageText(
     status.chat.id,
     statusMessageId,
-    '⏰ Слишком долго. Попробуй /list — возможно, инвойс готов.',
+    '⏰ Классификация идёт дольше обычного. Попробуй /list через минуту — возможно, инвойс готов.',
   );
 }
 

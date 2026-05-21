@@ -17,6 +17,8 @@ const schema = z.object({
 
   REDIS_URL: z.string().default('redis://127.0.0.1:6379'),
 
+  ANTHROPIC_API_KEY: z.string().optional(),
+
   CALLBACK_HMAC_SECRET: z.string().min(16).default('dev-only-callback-secret-change-me'),
 
   INITIAL_OWNER_TG_USER_ID: z.coerce.number().int().positive().optional(),

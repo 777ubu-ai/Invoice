@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import ExcelJS from 'exceljs';
 import { supabase } from './supabase.js';
 import { logger } from '../utils/logger.js';
+import { classifyWithClaude, isClaudeEnabled, type ClassifiedItem } from './classifier.js';
 import type {
   ApiClient,
   ApproveResult,
@@ -29,6 +30,67 @@ const TNVED_CATALOG: TnvedHit[] = [
   { code: '6910100000', description: 'Сантехника фарфоровая', duty_rate: 12 },
   { code: '7324900000', description: 'Сантехника из чёрных металлов', duty_rate: 10 },
 ];
+
+// Physical attributes only (article, original text, quantity, weights). Used both
+// for the hardcoded mock path and as input to the Claude classifier.
+function buildRawItems(): Array<Omit<InvoiceItem, 'tnved_code' | 'tnved_description' | 'duty_rate' | 'confidence' | 'needs_review' | 'reasoning' | 'alternatives' | 'review_reason' | 'index'>> {
+  return [
+    { article: 'WC-101', text_original: '陶瓷座便器 WC-101', text_translated: 'Унитаз фарфоровый', quantity: 120, gross_kg: 7200, net_kg: 6840 },
+    { article: 'SH-205', text_original: '不锈钢淋浴头 SH-205', text_translated: 'Лейка душевая из нержавеющей стали', quantity: 3400, gross_kg: 4080, net_kg: 3876 },
+    { article: 'PP-3-32', text_original: 'PP管件 32mm', text_translated: 'Фитинги PP 32мм', quantity: 85000, gross_kg: 8500, net_kg: 8075 },
+    { article: 'BV-1/2', text_original: '黄铜球阀 1/2', text_translated: 'Шаровой кран латунный 1/2"', quantity: 2200, gross_kg: 1980, net_kg: 1881 },
+    { article: 'EL-90', text_original: '钢制弯头 90度', text_translated: 'Отвод стальной 90°', quantity: 8500, gross_kg: 7650, net_kg: 7267 },
+    { article: 'K48-12', text_original: '金属配件 K48', text_translated: 'Металлические фитинги K48', quantity: 1920, gross_kg: 384, net_kg: 365 },
+    { article: 'M58-XX', text_original: '配件 M58', text_translated: 'Фитинг M58', quantity: 1230, gross_kg: 1386, net_kg: 1317 },
+  ];
+}
+
+// Send raw items to Claude for TN VED classification, then merge with physical data.
+async function classifyViaClaude(): Promise<InvoiceItem[]> {
+  const raw = buildRawItems();
+  const toClassify = raw.map((it, idx) => ({
+    index: idx + 1,
+    article: it.article,
+    text_original: it.text_original,
+    quantity: it.quantity,
+    gross_kg: it.gross_kg,
+  }));
+
+  const classifications: ClassifiedItem[] = await classifyWithClaude(toClassify);
+  const byIndex = new Map(classifications.map((c) => [c.index, c]));
+
+  return raw.map((phys, idx) => {
+    const index = idx + 1;
+    const c = byIndex.get(index);
+    if (!c) {
+      logger.warn({ index }, 'no classification from Claude — using fallback code');
+      return {
+        ...phys,
+        index,
+        tnved_code: '0000000000',
+        tnved_description: 'Не классифицировано',
+        duty_rate: 0,
+        confidence: 0,
+        needs_review: true,
+        review_reason: 'Claude не вернул классификацию',
+        reasoning: 'Не удалось получить классификацию от модели',
+        alternatives: [],
+      };
+    }
+    return {
+      ...phys,
+      index,
+      tnved_code: c.tnved_code,
+      tnved_description: c.tnved_description,
+      duty_rate: c.duty_rate,
+      confidence: c.confidence,
+      needs_review: c.needs_review,
+      review_reason: c.needs_review ? 'Низкая уверенность модели' : undefined,
+      reasoning: c.reasoning,
+      alternatives: c.alternatives,
+    };
+  });
+}
 
 // Canned items mirror the example from TZ section 4.2 (67 items condensed to 7 codes).
 function buildCannedItems(): InvoiceItem[] {
@@ -522,23 +584,45 @@ export class MockApiClient implements ApiClient {
       price_value: value ?? null,
     });
 
+    // If Claude API is configured, use it. Otherwise fall back to canned data
+    // (preserves a working demo when no key is set).
+    const useClaude = isClaudeEnabled();
+    const delay = useClaude ? 0 : CLASSIFICATION_DELAY_MS;
+
     setTimeout(() => {
       void (async () => {
         try {
-          const items = buildCannedItems();
+          const items = useClaude
+            ? await classifyViaClaude()
+            : buildCannedItems();
           const summary = computeSummary(items, mode, value);
           await setInvoiceFields(invoiceId, {
             status: 'REVIEW' as InvoiceStatus,
             items,
             summary,
           });
-          logger.info({ invoiceId }, 'mock classification done');
+          logger.info(
+            { invoiceId, source: useClaude ? 'claude' : 'mock' },
+            'classification done',
+          );
         } catch (err) {
-          logger.error({ err, invoiceId }, 'mock classification failed');
-          await setInvoiceFields(invoiceId, { status: 'FAILED' as InvoiceStatus }).catch(() => {});
+          logger.error({ err, invoiceId }, 'classification failed');
+          // Fall back to canned data if Claude call failed.
+          try {
+            const items = buildCannedItems();
+            const summary = computeSummary(items, mode, value);
+            await setInvoiceFields(invoiceId, {
+              status: 'REVIEW' as InvoiceStatus,
+              items,
+              summary,
+            });
+            logger.warn({ invoiceId }, 'fell back to canned data after error');
+          } catch (innerErr) {
+            await setInvoiceFields(invoiceId, { status: 'FAILED' as InvoiceStatus }).catch(() => {});
+          }
         }
       })();
-    }, CLASSIFICATION_DELAY_MS);
+    }, delay);
   }
 
   async getInvoice(invoiceId: string): Promise<InvoiceState> {

@@ -45,6 +45,8 @@ function buildCannedItems(): InvoiceItem[] {
       duty_rate: 12,
       confidence: 96,
       needs_review: false,
+      reasoning:
+        'Артикул WC (water closet) + 座便器 = унитаз. Материал по описанию — фарфор (陶瓷). Группа 6910 «Раковины, ванны, унитазы и прочие санитарно-технические изделия из керамики». Ставка 12%.',
     },
     {
       article: 'SH-205',
@@ -58,6 +60,8 @@ function buildCannedItems(): InvoiceItem[] {
       duty_rate: 10,
       confidence: 92,
       needs_review: false,
+      reasoning:
+        'Артикул SH (shower) + 淋浴头 = душевая лейка. Материал 不锈钢 — нержавеющая сталь (чёрный металл). Группа 7324 «Изделия санитарно-технические из чёрных металлов». Ставка 10%.',
     },
     {
       article: 'PP-3-32',
@@ -71,6 +75,8 @@ function buildCannedItems(): InvoiceItem[] {
       duty_rate: 6.5,
       confidence: 94,
       needs_review: false,
+      reasoning:
+        'PP = полипропилен (пластмасса), 管件 = фитинги. Группа 3917 «Трубы, фитинги из пластмасс», подгруппа 3917 40 — фитинги. Ставка 6,5%.',
     },
     {
       article: 'BV-1/2',
@@ -84,6 +90,8 @@ function buildCannedItems(): InvoiceItem[] {
       duty_rate: 5,
       confidence: 89,
       needs_review: false,
+      reasoning:
+        'BV = ball valve (шаровой кран), 球阀 = шаровой кран. Материал 黄铜 — латунь. Группа 8481 «Краны, клапаны, вентили», подгруппа 8481 80 — прочие. Ставка 5%.',
     },
     {
       article: 'EL-90',
@@ -97,6 +105,8 @@ function buildCannedItems(): InvoiceItem[] {
       duty_rate: 5,
       confidence: 91,
       needs_review: false,
+      reasoning:
+        'EL = elbow (отвод), 弯头 90度 = угол 90°. Материал 钢制 — сталь (чёрный металл). Группа 7307 «Фитинги для труб из чёрных металлов», подгруппа 7307 99 — прочие. Ставка 5%.',
     },
     {
       article: 'K48-12',
@@ -110,11 +120,13 @@ function buildCannedItems(): InvoiceItem[] {
       duty_rate: 3,
       confidence: 65,
       needs_review: true,
-      review_reason: 'Низкая уверенность модели',
+      review_reason: 'Низкая уверенность: материал явно не указан в описании',
+      reasoning:
+        '金属配件 = металлический фитинг, конкретный сплав не уточнён. Артикул K48 не даёт явного признака. Предварительно отнесено к меди (7412 20). Требуется проверка спецификации поставщика.',
       alternatives: [
-        { code: '7412200000', description: 'Фитинги из медных сплавов' },
-        { code: '7415310000', description: 'Гайки, шурупы из меди' },
-        { code: '8481808199', description: 'Краны латунные' },
+        { code: '7412200000', description: 'Фитинги из медных сплавов (3%)' },
+        { code: '7415310000', description: 'Гайки, шурупы из меди (5%)' },
+        { code: '8481808199', description: 'Краны латунные (5%)' },
       ],
     },
     {
@@ -129,10 +141,12 @@ function buildCannedItems(): InvoiceItem[] {
       duty_rate: 5,
       confidence: 72,
       needs_review: true,
-      review_reason: 'Фото нечёткое',
+      review_reason: 'Фото нечёткое, материал не идентифицирован',
+      reasoning:
+        '配件 = фитинг (общее), маркировка M58-XX без явного материала. По упаковке и весу — предположительно чёрный металл, 7307 99. Уверенность 72% — рекомендуется уточнить у поставщика.',
       alternatives: [
-        { code: '7307990000', description: 'Прочие фитинги из чёрных металлов' },
-        { code: '7412200000', description: 'Фитинги из медных сплавов' },
+        { code: '7307990000', description: 'Прочие фитинги из чёрных металлов (5%)' },
+        { code: '7412200000', description: 'Фитинги из медных сплавов (3%)' },
       ],
     },
   ];
@@ -150,14 +164,16 @@ function computeSummary(
 
   // Cost backsolved to hit `value` total payments when mode is TARGET_PAYMENTS.
   // Fixed cost for other modes to keep mock deterministic.
+  // Customs fee: 26 000 KZT fixed (≈ $54 at 480 KZT/USD).
+  const CUSTOMS_FEE_USD = 54;
+
   let cost: number;
   if (mode === 'TARGET_PAYMENTS' && value) {
     // duty + vat(16%) + fee ≈ value;  cost is the major source — fit numerically.
     const avgDuty = 0.066;
     const vatRate = 0.16;
-    const fee = 46;
     const denom = avgDuty + vatRate * (1 + avgDuty);
-    cost = Math.round((value - fee) / denom);
+    cost = Math.round((value - CUSTOMS_FEE_USD) / denom);
   } else if (mode === 'PRICE_PER_KG' && value) {
     cost = Math.round(net * value);
   } else {
@@ -168,7 +184,7 @@ function computeSummary(
     items.reduce((s, i) => s + (cost * i.gross_kg) / gross * (i.duty_rate / 100), 0),
   );
   const vat = Math.round((cost + duty) * 0.16);
-  const fee = 46;
+  const fee = CUSTOMS_FEE_USD;
   const total = duty + vat + fee;
 
   return {
@@ -338,6 +354,7 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
   });
 
   // ---------- Totals row ----------
+  let breakdownStart = HEADER_ROW + 3;
   if (items.length > 0) {
     const lastItemRow = START_ROW + items.length - 1;
     const totalRow = lastItemRow + 2;
@@ -357,6 +374,106 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
         right: { style: 'thin' },
       };
     }
+    breakdownStart = totalRow + 3;
+  }
+
+  // ---------- Section 2: reasoning + per-position duty breakdown ----------
+  if (items.length > 0 && summary) {
+    let r = breakdownStart;
+    ws.getCell(`A${r}`).value = 'ОБОСНОВАНИЕ ВЫБОРА КОДОВ ТН ВЭД И РАСЧЁТ ПОШЛИН';
+    ws.getCell(`A${r}`).font = { bold: true, size: 12 };
+    ws.mergeCells(`A${r}:H${r}`);
+    r += 2;
+
+    const HEADERS_2 = [
+      ['A', '#'],
+      ['B', 'Код ТН ВЭД'],
+      ['C', 'Описание'],
+      ['D', 'Обоснование'],
+      ['E', 'Стоимость $'],
+      ['F', 'Ставка'],
+      ['G', 'Пошлина $'],
+      ['H', 'НДС 16% $'],
+    ];
+    for (const [col, label] of HEADERS_2) {
+      const cell = ws.getCell(`${col}${r}`);
+      cell.value = label;
+      cell.font = { bold: true };
+      cell.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' };
+      cell.border = {
+        top: { style: 'thin' },
+        bottom: { style: 'thin' },
+        left: { style: 'thin' },
+        right: { style: 'thin' },
+      };
+    }
+    ws.getRow(r).height = 28;
+    r += 1;
+
+    const breakdownStartRow = r;
+    for (const it of items) {
+      const itemCostValue = itemCost(it);
+      const dutyValue = Math.round(itemCostValue * (it.duty_rate / 100) * 100) / 100;
+      const vatValue = Math.round((itemCostValue + dutyValue) * 0.16 * 100) / 100;
+
+      ws.getCell(`A${r}`).value = it.index;
+      ws.getCell(`B${r}`).value = Number(it.tnved_code);
+      ws.getCell(`C${r}`).value = it.tnved_description;
+      ws.getCell(`D${r}`).value = it.reasoning ?? '';
+      ws.getCell(`D${r}`).alignment = { wrapText: true, vertical: 'top' };
+      ws.getCell(`E${r}`).value = itemCostValue;
+      ws.getCell(`E${r}`).numFmt = '#,##0.00';
+      ws.getCell(`F${r}`).value = `${it.duty_rate}%`;
+      ws.getCell(`G${r}`).value = dutyValue;
+      ws.getCell(`G${r}`).numFmt = '#,##0.00';
+      ws.getCell(`H${r}`).value = vatValue;
+      ws.getCell(`H${r}`).numFmt = '#,##0.00';
+      for (let c = 1; c <= 8; c++) {
+        ws.getRow(r).getCell(c).border = {
+          top: { style: 'thin' },
+          bottom: { style: 'thin' },
+          left: { style: 'thin' },
+          right: { style: 'thin' },
+        };
+      }
+      ws.getRow(r).height = 60;
+      r += 1;
+    }
+
+    // Final payment totals block.
+    r += 1;
+    ws.getCell(`A${r}`).value = 'ВСЕГО К ОПЛАТЕ:';
+    ws.getCell(`A${r}`).font = { bold: true, size: 11 };
+    ws.mergeCells(`A${r}:H${r}`);
+    r += 1;
+
+    const totals: Array<[string, number]> = [
+      ['Стоимость товара', summary.cost_usd],
+      ['Пошлина', summary.duty_usd],
+      ['НДС 16%', summary.vat_usd],
+      ['Таможенный сбор (26 000 ₸)', summary.fee_usd],
+      ['ВСЕГО ПЛАТЕЖЕЙ', summary.total_payments_usd],
+    ];
+    for (const [label, amount] of totals) {
+      const isFinal = label === 'ВСЕГО ПЛАТЕЖЕЙ';
+      ws.getCell(`A${r}`).value = label;
+      ws.mergeCells(`A${r}:G${r}`);
+      ws.getCell(`H${r}`).value = amount;
+      ws.getCell(`H${r}`).numFmt = '$#,##0.00';
+      if (isFinal) {
+        ws.getCell(`A${r}`).font = { bold: true };
+        ws.getCell(`H${r}`).font = { bold: true };
+      }
+      ws.getCell(`A${r}`).alignment = { horizontal: 'right' };
+      ws.getRow(r).getCell(8).border = {
+        top: { style: 'thin' },
+        bottom: { style: isFinal ? 'medium' : 'thin' },
+        left: { style: 'thin' },
+        right: { style: 'thin' },
+      };
+      r += 1;
+    }
+    void breakdownStartRow;
   }
 
   const dir = join(tmpdir(), 'tnved-invoices');

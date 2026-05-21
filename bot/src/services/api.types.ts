@@ -23,6 +23,7 @@ export interface InvoiceItem {
   confidence: number;
   needs_review: boolean;
   review_reason?: string;
+  reasoning?: string;
   alternatives?: Array<{ code: string; description: string }>;
 }
 

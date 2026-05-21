@@ -46,6 +46,10 @@ callbacks.callbackQuery(/^inv:item:([^:]+):(\d+)$/, async (ctx) => {
     .map((a, i) => `${i + 1}. ${a.code} — ${a.description}`)
     .join('\n');
 
+  const reasoningBlock = item.reasoning
+    ? ['━━━━━━━━━━━━━━━━━━━━', `💡 Обоснование выбора:`, item.reasoning]
+    : [];
+
   await ctx.reply(
     [
       `Позиция #${item.index}:`,
@@ -57,6 +61,7 @@ callbacks.callbackQuery(/^inv:item:([^:]+):(\d+)$/, async (ctx) => {
       `Описание: ${item.tnved_description}`,
       `Ставка пошлины: ${item.duty_rate}%`,
       `Уверенность LLM: ${item.confidence}% ${item.confidence < 80 ? '⚠️' : '✅'}`,
+      ...reasoningBlock,
       '━━━━━━━━━━━━━━━━━━━━',
       'Альтернативы:',
       alts || '—',

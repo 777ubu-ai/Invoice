@@ -186,6 +186,10 @@ async function getInvoiceRow(invoiceId: string): Promise<InvoiceState> {
     summary: data.summary,
     items: data.items,
     result_file_url: data.result_file_url,
+    source_file_url: data.source_file_url,
+    assigned_to: data.assigned_to,
+    created_by: data.created_by,
+    reassigned_from: data.reassigned_from,
     created_at: data.created_at,
     updated_at: data.updated_at,
   };

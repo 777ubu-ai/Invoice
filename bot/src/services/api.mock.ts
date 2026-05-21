@@ -230,40 +230,133 @@ async function generateInvoiceNumber(): Promise<string> {
 async function buildXlsx(invoice: InvoiceState): Promise<string> {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'TNVED.ai bot';
-  const ws = wb.addWorksheet('Invoice');
-  ws.columns = [
-    { header: '#', key: 'idx', width: 5 },
-    { header: 'Артикул', key: 'art', width: 12 },
-    { header: 'Описание', key: 'desc', width: 36 },
-    { header: 'Кол-во', key: 'qty', width: 10 },
-    { header: 'Брутто, кг', key: 'gross', width: 12 },
-    { header: 'Нетто, кг', key: 'net', width: 12 },
-    { header: 'Код ТН ВЭД', key: 'code', width: 14 },
-    { header: 'Ставка', key: 'rate', width: 8 },
-  ];
-  for (const item of invoice.items ?? []) {
-    ws.addRow({
-      idx: item.index,
-      art: item.article,
-      desc: item.text_translated,
-      qty: item.quantity,
-      gross: item.gross_kg,
-      net: item.net_kg,
-      code: item.tnved_code,
-      rate: `${item.duty_rate}%`,
-    });
-  }
-  ws.getRow(1).font = { bold: true };
+  const sheetName = invoice.invoice_number?.slice(-4) ?? '0001';
+  const ws = wb.addWorksheet(sheetName);
 
-  const s = invoice.summary;
-  if (s) {
-    ws.addRow({});
-    ws.addRow({ desc: 'ИТОГО:', code: '' });
-    ws.addRow({ desc: 'Стоимость, $', qty: s.cost_usd });
-    ws.addRow({ desc: 'Пошлина, $', qty: s.duty_usd });
-    ws.addRow({ desc: 'НДС 16%, $', qty: s.vat_usd });
-    ws.addRow({ desc: 'Сбор, $', qty: s.fee_usd });
-    ws.addRow({ desc: 'ВСЕГО ПЛАТЕЖЕЙ, $', qty: s.total_payments_usd });
+  // Column widths to match the LINEA TRANSIT template.
+  const widths = [18, 50, 14, 10, 12, 12, 12, 14];
+  widths.forEach((w, i) => {
+    ws.getColumn(i + 1).width = w;
+  });
+
+  const items = invoice.items ?? [];
+  const summary = invoice.summary;
+  const totalNet = items.reduce((s, it) => s + it.net_kg, 0);
+  const totalCost = summary?.cost_usd ?? 0;
+
+  // Per-item cost = proportional share of total cost by net weight.
+  const itemCost = (it: { net_kg: number }) =>
+    totalNet > 0 ? Math.round((totalCost * it.net_kg) / totalNet * 100) / 100 : 0;
+
+  // ---------- Header section ----------
+  ws.getCell('A1').value = 'ГРУЗООТПРАВИТЕЛЬ';
+  ws.getCell('A1').font = { bold: true };
+  ws.getCell('C1').value = 'XINJIANG TERRITORY VERTICAL ELECTRONIC COMMERCE.,LTD';
+  ws.getCell('C2').value =
+    'COMPANY ADDRESS: ADD: YILI PREFECTURE IN XINJIANG PROVINCE LANZHOU, HUOERGOS CITY RIVERSIDE ROADLANE 1, ROOM 201, BUILDING 1 UNIT';
+  ws.getCell('C2').alignment = { wrapText: true };
+
+  ws.getCell('A4').value = 'ГРУЗОПОЛУЧАТЕЛЬ';
+  ws.getCell('A4').font = { bold: true };
+
+  if (invoice.client_name.includes('LINEA')) {
+    ws.getCell('C4').value = 'ТОО "LINEA TRANSIT"  БИН: 2604 4003 9864';
+    ws.getCell('C5').value =
+      'РК, область Жетісу, город Талдыкорган, улица Абылай хана, дом 363';
+  } else {
+    ws.getCell('C4').value = invoice.client_name;
+  }
+  ws.getCell('C5').alignment = { wrapText: true };
+
+  const today = new Date().toLocaleDateString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+  ws.getCell('C7').value = 'ИНВОЙС - УПАКОВОЧНЫЙ ЛИСТ:';
+  ws.getCell('C7').font = { bold: true };
+  ws.getCell('H7').value = `№ ${invoice.invoice_number ?? ''} от ${today}г.`;
+  ws.getCell('H7').font = { bold: true };
+
+  ws.getCell('A9').value = 'МЕСТО ДОСТАВКИ ТОВАРА: QAZAQSTAN, ALMATY';
+  ws.getCell('A10').value = 'УСЛОВИЕ ПОСТАВКИ: DAP NUR ZHOLY';
+  ws.getCell('A11').value = 'УКАЗАННЫЕ ТОВАРЫ КИТАЙСКОГО ПРОИСХОЖДЕНИЯ';
+  ws.getCell('A12').value = 'КОНТРАКТ: LT001 от 01.05.2026г.';
+  ws.getCell('A13').value = 'АВТО № 229BHW02-15ALZ02';
+
+  // ---------- Table header (row 15) ----------
+  const HEADER_ROW = 15;
+  const headers = [
+    ['B', 'НАИМЕНОВАНИЕ ТОВАРА'],
+    ['C', 'КОД ТН ВЭД'],
+    ['D', 'КОЛИЧЕСТВО МЕСТ'],
+    ['E', 'КОЛИЧЕСТВО (ШТ)'],
+    ['F', 'ВЕС НЕТТО (KG)'],
+    ['G', 'ВЕС БРУТТО (KG)'],
+    ['H', 'СТОИМОСТЬ ($)'],
+  ];
+  for (const [col, label] of headers) {
+    const cell = ws.getCell(`${col}${HEADER_ROW}`);
+    cell.value = label;
+    cell.font = { bold: true };
+    cell.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' };
+    cell.border = {
+      top: { style: 'thin' },
+      bottom: { style: 'thin' },
+      left: { style: 'thin' },
+      right: { style: 'thin' },
+    };
+  }
+  ws.getRow(HEADER_ROW).height = 32;
+
+  // ---------- Item rows ----------
+  const START_ROW = HEADER_ROW + 1;
+  items.forEach((item, idx) => {
+    const r = START_ROW + idx;
+    if (idx === 0) {
+      ws.getCell(`A${r}`).value = 'САНТЕХНИКА - САНИТАРНО-ТЕХНИЧЕСКОЕ ОБОРУДОВАНИЕ';
+      ws.getCell(`A${r}`).alignment = { wrapText: true, vertical: 'top' };
+    }
+    ws.getCell(`B${r}`).value = item.text_translated.toUpperCase();
+    ws.getCell(`B${r}`).alignment = { wrapText: true, vertical: 'top' };
+    ws.getCell(`C${r}`).value = Number(item.tnved_code);
+    ws.getCell(`D${r}`).value = Math.max(1, Math.ceil(item.quantity / 100));
+    ws.getCell(`E${r}`).value = item.quantity;
+    ws.getCell(`F${r}`).value = item.net_kg;
+    ws.getCell(`G${r}`).value = item.gross_kg;
+    ws.getCell(`H${r}`).value = itemCost(item);
+    ws.getCell(`H${r}`).numFmt = '#,##0.00';
+
+    for (let c = 1; c <= 8; c++) {
+      ws.getRow(r).getCell(c).border = {
+        top: { style: 'thin' },
+        bottom: { style: 'thin' },
+        left: { style: 'thin' },
+        right: { style: 'thin' },
+      };
+    }
+  });
+
+  // ---------- Totals row ----------
+  if (items.length > 0) {
+    const lastItemRow = START_ROW + items.length - 1;
+    const totalRow = lastItemRow + 2;
+    ws.getCell(`C${totalRow}`).value = 'ИТОГО:';
+    ws.getCell(`D${totalRow}`).value = { formula: `SUM(D${START_ROW}:D${lastItemRow})` };
+    ws.getCell(`E${totalRow}`).value = { formula: `SUM(E${START_ROW}:E${lastItemRow})` };
+    ws.getCell(`F${totalRow}`).value = { formula: `SUM(F${START_ROW}:F${lastItemRow})` };
+    ws.getCell(`G${totalRow}`).value = { formula: `SUM(G${START_ROW}:G${lastItemRow})` };
+    ws.getCell(`H${totalRow}`).value = { formula: `SUM(H${START_ROW}:H${lastItemRow})` };
+    ws.getCell(`H${totalRow}`).numFmt = '#,##0.00';
+    for (let c = 1; c <= 8; c++) {
+      ws.getRow(totalRow).getCell(c).font = { bold: true };
+      ws.getRow(totalRow).getCell(c).border = {
+        top: { style: 'thin' },
+        bottom: { style: 'thin' },
+        left: { style: 'thin' },
+        right: { style: 'thin' },
+      };
+    }
   }
 
   const dir = join(tmpdir(), 'tnved-invoices');

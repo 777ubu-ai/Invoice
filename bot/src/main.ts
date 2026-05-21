@@ -8,7 +8,15 @@ async function main(): Promise<void> {
   const me = await bot.api.getMe();
   logger.info({ username: me.username, id: me.id, env: env.NODE_ENV }, 'bot starting');
 
-  // Long polling. Webhook deferred to Sprint 3 follow-up.
+  // Drop any prior webhook (e.g. from the Supabase Edge Function) so long
+  // polling can take over without 409 Conflict.
+  try {
+    await bot.api.deleteWebhook({ drop_pending_updates: true });
+    logger.info('webhook cleared, switching to long polling');
+  } catch (err) {
+    logger.warn({ err }, 'deleteWebhook failed (continuing anyway)');
+  }
+
   bot.start({
     onStart: (info) => logger.info({ username: info.username }, 'bot ready'),
     drop_pending_updates: true,

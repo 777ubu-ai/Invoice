@@ -1,17 +1,21 @@
-FROM node:20-alpine AS base
+FROM node:20-alpine AS build
 WORKDIR /app
+
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev=false
+RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
 COPY scripts ./scripts
 RUN npm run build
 
-FROM node:20-alpine AS runtime
+FROM node:20-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=base /app/node_modules ./node_modules
-COPY --from=base /app/dist ./dist
-COPY --from=base /app/package.json ./
+
+COPY package.json package-lock.json* ./
+RUN npm ci --omit=dev
+
+COPY --from=build /app/dist ./dist
+
 CMD ["node", "dist/src/main.js"]

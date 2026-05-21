@@ -25,6 +25,10 @@ export interface InvoiceItem {
   review_reason?: string;
   reasoning?: string;
   alternatives?: Array<{ code: string; description: string }>;
+  // Финансы — заполняет агент Лаура.
+  cost_usd?: number;
+  duty_usd?: number;
+  vat_usd?: number;
 }
 
 export interface InvoiceSummary {
@@ -39,6 +43,10 @@ export interface InvoiceSummary {
   fee_usd: number;
   total_payments_usd: number;
   target_usd?: number;
+  laura_notes?: string;
+  make_approved?: boolean;
+  make_warnings?: string[];
+  make_notes?: string;
 }
 
 export interface InvoiceState {

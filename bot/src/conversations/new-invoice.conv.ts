@@ -133,7 +133,16 @@ export async function newInvoiceConversation(
     payload: { mode, value },
   });
 
-  const status = await ctx.reply('🔄 Запускаю классификатор...\n⏳ Это займёт 3-5 минут (3 агента + проверка)');
+  const status = await ctx.reply(
+    '🔄 Запускаю классификатор...\n' +
+      '⏳ Это займёт 4-6 минут\n' +
+      '👥 Команда:\n' +
+      '   • Переводчик — извлекает позиции\n' +
+      '   • Классификатор — подбирает коды ТН ВЭД\n' +
+      '   • Ревьюер — проверяет коды\n' +
+      '   • Лаура (финансист) — считает стоимость, пошлину, НДС\n' +
+      '   • Маке (главный) — даёт финальное одобрение',
+  );
   const statusMessageId = status.message_id;
 
   // 7. Poll until REVIEW / FAILED. Pipeline = translator (~45s) + classifier (~2 min) + reviewer (~50s),
@@ -169,14 +178,18 @@ export async function newInvoiceConversation(
       const elapsedSec = attempt * POLL_INTERVAL_SEC;
       const stageHint =
         elapsedSec < 60
-          ? 'агент 1 (перевод)'
-          : elapsedSec < 200
-            ? 'агент 2 (коды ТН ВЭД)'
-            : 'агент 3 (ревью)';
+          ? 'Переводчик'
+          : elapsedSec < 180
+            ? 'Классификатор (коды ТН ВЭД)'
+            : elapsedSec < 240
+              ? 'Ревьюер (проверка кодов)'
+              : elapsedSec < 280
+                ? 'Лаура (расчёт стоимости)'
+                : 'Маке (финальная приёмка)';
       await ctx.api.editMessageText(
         status.chat.id,
         statusMessageId,
-        `🔄 Классификация: ${stageHint}... (${elapsedSec} сек)`,
+        `🔄 ${stageHint}... (${elapsedSec} сек)`,
       );
     }
   }

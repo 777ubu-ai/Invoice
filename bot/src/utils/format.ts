@@ -28,11 +28,25 @@ export function invoiceSummaryText(inv: InvoiceState): string {
     lines.push(targetLine);
     lines.push('━━━━━━━━━━━━━━━━━━━━');
   }
+  if (s?.laura_notes) {
+    lines.push(`💼 Лаура (финансы): ${s.laura_notes}`);
+  }
+  if (s?.make_notes) {
+    const stamp = s.make_approved ? '✅' : '❌';
+    lines.push(`${stamp} Маке (главный): ${s.make_notes}`);
+    if (s.make_warnings && s.make_warnings.length > 0) {
+      lines.push(`   ⚠️ Замечания Маке:`);
+      for (const w of s.make_warnings) lines.push(`     • ${w}`);
+    }
+  }
   const review = (inv.items ?? []).filter((i) => i.needs_review);
   if (review.length > 0) {
     lines.push(`⚠️ ${review.length} позиций требуют ревью:`);
-    for (const it of review) {
+    for (const it of review.slice(0, 10)) {
       lines.push(`  • #${it.index}: «${it.text_original}» (уверенность ${it.confidence}%)`);
+    }
+    if (review.length > 10) {
+      lines.push(`  …и ещё ${review.length - 10} позиций`);
     }
   }
   return lines.join('\n');

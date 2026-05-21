@@ -382,18 +382,265 @@ export async function agentReviewer(items: ClassifiedItem[]): Promise<ReviewedIt
 }
 
 // -----------------------------------------------------------------------------
-// ПОЛНЫЙ PIPELINE
+// АГЕНТ 4 — ЛАУРА (ФИНАНСИСТ / ТАМОЖЕННЫЙ КАЛЬКУЛЯТОР)
+// -----------------------------------------------------------------------------
+// Лаура — старший финансист-таможенник РК. Отвечает за стоимость, пошлину,
+// НДС и таможенный сбор. Никогда не отпускает инвойс без стоимости.
+//
+// Логика расчёта детерминирована (это арифметика, не место для LLM-фантазии),
+// но мы оборачиваем её в её отчёт с проверкой согласованности.
+
+export type LauraPriceMode = 'TARGET_PAYMENTS' | 'PRICE_PER_KG' | 'CLIENT_PRICELIST' | 'KGD_INDICATIVE';
+
+export interface PricedItem extends ReviewedItem {
+  cost_usd: number;
+  duty_usd: number;
+  vat_usd: number;
+}
+
+export interface LauraReport {
+  items: PricedItem[];
+  totals: {
+    gross_kg: number;
+    net_kg: number;
+    units: number;
+    cost_usd: number;
+    duty_usd: number;
+    vat_usd: number;
+    fee_usd: number;
+    total_payments_usd: number;
+    target_usd?: number;
+  };
+  notes: string;
+}
+
+// Конвертация KZT -> USD по таможенному курсу (упрощённо).
+const KZT_PER_USD = 480;
+const CUSTOMS_FEE_KZT = 26000;
+const VAT_RATE = 0.16;
+const DEFAULT_PRICE_PER_KG_LINEA = 0.75;
+
+export function agentLaura(
+  items: ReviewedItem[],
+  mode: LauraPriceMode,
+  value: number | undefined,
+  defaultPricePerKg: number = DEFAULT_PRICE_PER_KG_LINEA,
+): LauraReport {
+  const t0 = Date.now();
+  if (items.length === 0) {
+    throw new Error('Лаура (Финансист): нет позиций для расчёта стоимости');
+  }
+  const grossTotal = items.reduce((s, i) => s + (i.gross_kg || 0), 0);
+  const netTotal = items.reduce((s, i) => s + (i.net_kg || 0), 0);
+  const unitsTotal = items.reduce((s, i) => s + (i.quantity || 0), 0);
+  if (netTotal <= 0) {
+    throw new Error('Лаура (Финансист): суммарный вес нетто = 0, расчёт невозможен');
+  }
+
+  const feeUsd = Math.round((CUSTOMS_FEE_KZT / KZT_PER_USD) * 100) / 100;
+
+  // ---------- 1. Считаем общую стоимость партии ----------
+  let totalCostUsd: number;
+  let notes: string;
+  if (mode === 'TARGET_PAYMENTS' && value && value > 0) {
+    // Цель: чтобы итог платежей (пошлина+НДС+сбор) ≈ value.
+    // Считаем средневзвешенную ставку пошлины по весу.
+    const weightedDuty =
+      items.reduce((s, i) => s + (i.duty_rate / 100) * (i.gross_kg || 0), 0) /
+      Math.max(grossTotal, 1);
+    const denom = weightedDuty + VAT_RATE * (1 + weightedDuty);
+    totalCostUsd = Math.max(1, Math.round((value - feeUsd) / denom));
+    notes = `Режим TARGET_PAYMENTS: цель платежей $${value}. Средняя ставка пошлины ${(weightedDuty * 100).toFixed(2)}%. Расчётная инвойсная стоимость партии: $${totalCostUsd}.`;
+  } else if (mode === 'PRICE_PER_KG' && value && value > 0) {
+    totalCostUsd = Math.round(netTotal * value);
+    notes = `Режим PRICE_PER_KG: $${value}/кг × ${netTotal.toFixed(2)} кг нетто = $${totalCostUsd}.`;
+  } else {
+    totalCostUsd = Math.round(netTotal * defaultPricePerKg);
+    notes = `Режим по умолчанию (прайс клиента): $${defaultPricePerKg}/кг × ${netTotal.toFixed(2)} кг нетто = $${totalCostUsd}.`;
+  }
+
+  // ---------- 2. Распределяем стоимость пропорционально нетто ----------
+  let costSum = 0;
+  const priced: PricedItem[] = items.map((it, idx) => {
+    const isLast = idx === items.length - 1;
+    const share = netTotal > 0 ? (it.net_kg || 0) / netTotal : 1 / items.length;
+    let costItem = Math.round(totalCostUsd * share * 100) / 100;
+    if (isLast) costItem = Math.round((totalCostUsd - costSum) * 100) / 100;
+    costSum += costItem;
+    const dutyItem = Math.round(costItem * (it.duty_rate / 100) * 100) / 100;
+    const vatItem = Math.round((costItem + dutyItem) * VAT_RATE * 100) / 100;
+    return { ...it, cost_usd: costItem, duty_usd: dutyItem, vat_usd: vatItem };
+  });
+
+  // ---------- 3. Итоги ----------
+  const dutyUsd = Math.round(priced.reduce((s, i) => s + i.duty_usd, 0) * 100) / 100;
+  const vatUsd = Math.round(priced.reduce((s, i) => s + i.vat_usd, 0) * 100) / 100;
+  const totalPayments = Math.round((dutyUsd + vatUsd + feeUsd) * 100) / 100;
+
+  if (totalCostUsd <= 0) {
+    throw new Error('Лаура (Финансист): расчётная стоимость = 0, отказ отправлять инвойс');
+  }
+
+  logger.info(
+    {
+      ms: Date.now() - t0,
+      mode,
+      value,
+      items: items.length,
+      cost_usd: totalCostUsd,
+      duty_usd: dutyUsd,
+      vat_usd: vatUsd,
+      fee_usd: feeUsd,
+      total_payments: totalPayments,
+    },
+    'agent 4 Лаура done',
+  );
+
+  return {
+    items: priced,
+    totals: {
+      gross_kg: grossTotal,
+      net_kg: netTotal,
+      units: unitsTotal,
+      cost_usd: totalCostUsd,
+      duty_usd: dutyUsd,
+      vat_usd: vatUsd,
+      fee_usd: feeUsd,
+      total_payments_usd: totalPayments,
+      target_usd: mode === 'TARGET_PAYMENTS' ? value : undefined,
+    },
+    notes,
+  };
+}
+
+// -----------------------------------------------------------------------------
+// АГЕНТ 5 — МАКЕ (ГЛАВНЫЙ ТАМОЖЕННЫЙ БРОКЕР, ФИНАЛЬНЫЙ ВЕРИФИКАТОР)
+// -----------------------------------------------------------------------------
+const MAKE_PROMPT = `Ты — Маке, главный таможенный брокер и финансист РК. Лучший в стране.
+Твоя задача — финальная проверка инвойса перед отправкой клиенту. Без твоего одобрения инвойс не уходит.
+
+ПРОВЕРЬ:
+1. КОДЫ ТН ВЭД: каждый код — ровно 10 цифр, существует в ЕАЭС, соответствует описанию товара.
+2. КАТЕГОРИЯ: основная группа товаров (по большинству позиций) согласована — если 80%+ позиций мебель (94хх), то это мебельная партия; не должно быть кода из совершенно чужой группы.
+3. ВЕСА: брутто >= нетто; не должно быть позиций с весом 0 или явно абсурдным (>10 тонн на штуку).
+4. ФИНАНСЫ:
+   - Общая стоимость > $0 (категорически не пропускай инвойс без стоимости).
+   - По каждой позиции: cost_usd > 0, duty_usd = cost_usd × duty_rate%, vat_usd = (cost_usd + duty_usd) × 16%.
+   - Сбор таможенный = ~$54 (26 000 KZT).
+   - Итоговые суммы сходятся.
+5. ЦЕЛЬ: если оператор задал целевую сумму платежей, расчёт должен попадать в неё ±10%.
+
+ВЫВОД — СТРОГО валидный JSON, без markdown:
+{
+  "approved": true,
+  "warnings": ["Позиция #5: общее описание 'мебель' — стоит уточнить материал"],
+  "make_notes": "Партия мебельная, 51 из 61 позиций в группе 94. Стоимость распределена корректно. Одобрено."
+}
+
+ВАЖНО:
+- approved: false ставь ТОЛЬКО при критических ошибках (стоимость = 0, код не 10 цифр, итоги не сходятся).
+- warnings — мягкие замечания, не блокируют отправку.
+- make_notes — твой профессиональный вердикт 1-3 предложения.`;
+
+export interface MakeVerdict {
+  approved: boolean;
+  warnings: string[];
+  notes: string;
+}
+
+export async function agentMake(report: LauraReport): Promise<MakeVerdict> {
+  const t0 = Date.now();
+  const c = client();
+
+  // Suммаризированный вход — не отправляем Маке весь сырой текст, только агрегаты.
+  const codeBreakdown: Record<string, number> = {};
+  for (const it of report.items) {
+    const grp = it.tnved_code.slice(0, 2);
+    codeBreakdown[grp] = (codeBreakdown[grp] ?? 0) + 1;
+  }
+
+  const inputJson = JSON.stringify({
+    totals: report.totals,
+    code_groups: codeBreakdown,
+    sample_items: report.items.slice(0, 5).map((i) => ({
+      index: i.index,
+      text: i.text_translated,
+      code: i.tnved_code,
+      duty_rate: i.duty_rate,
+      net_kg: i.net_kg,
+      cost_usd: i.cost_usd,
+      duty_usd: i.duty_usd,
+      vat_usd: i.vat_usd,
+    })),
+    zero_cost_items: report.items.filter((i) => i.cost_usd <= 0).length,
+    zero_weight_items: report.items.filter((i) => (i.net_kg || 0) <= 0).length,
+  });
+
+  const response = await c.messages.create({
+    model: 'claude-opus-4-7',
+    max_tokens: 1500,
+    system: [{ type: 'text', text: MAKE_PROMPT, cache_control: { type: 'ephemeral' } }],
+    messages: [
+      { role: 'user', content: `Дай финальное заключение по инвойсу:\n\n${inputJson}` },
+    ],
+  });
+
+  const textBlock = response.content.find((b) => b.type === 'text');
+  if (!textBlock || textBlock.type !== 'text') {
+    throw new Error('Маке (Главный): пустой ответ');
+  }
+  const parsed = extractJson<{ approved: boolean; warnings?: string[]; make_notes?: string }>(textBlock.text);
+
+  // Hard safety: never approve if cost is missing.
+  const hardFailures: string[] = [];
+  if (report.totals.cost_usd <= 0) hardFailures.push('Стоимость инвойса = 0 — категорически нельзя отправлять.');
+  if (report.items.some((i) => i.cost_usd <= 0)) hardFailures.push('Есть позиции с нулевой стоимостью.');
+  const approved = parsed.approved && hardFailures.length === 0;
+
+  logger.info(
+    {
+      ms: Date.now() - t0,
+      approved,
+      warnings: parsed.warnings?.length ?? 0,
+      hard_failures: hardFailures.length,
+      input_tokens: response.usage.input_tokens,
+      output_tokens: response.usage.output_tokens,
+    },
+    'agent 5 Маке done',
+  );
+
+  return {
+    approved,
+    warnings: [...(parsed.warnings ?? []), ...hardFailures],
+    notes: parsed.make_notes ?? '',
+  };
+}
+
+// -----------------------------------------------------------------------------
+// ПОЛНЫЙ PIPELINE: Переводчик → Классификатор → Ревьюер → Лаура → Маке
 // -----------------------------------------------------------------------------
 
 export interface PipelineProgress {
-  stage: 1 | 2 | 3;
+  stage: 1 | 2 | 3 | 4 | 5;
   label: string;
+}
+
+export interface PipelineResult {
+  items: PricedItem[];
+  financials: LauraReport['totals'];
+  laura_notes: string;
+  make: MakeVerdict;
 }
 
 export async function runClassificationPipeline(
   fileText: string,
+  options: {
+    mode: LauraPriceMode;
+    value?: number;
+    defaultPricePerKg?: number;
+  },
   onProgress?: (p: PipelineProgress) => void | Promise<void>,
-): Promise<ReviewedItem[]> {
+): Promise<PipelineResult> {
   onProgress?.({ stage: 1, label: 'Агент 1: перевод и извлечение позиций...' });
   const translated = await agentTranslator(fileText);
 
@@ -403,5 +650,22 @@ export async function runClassificationPipeline(
   onProgress?.({ stage: 3, label: 'Агент 3: проверка работы классификатора...' });
   const reviewed = await agentReviewer(classified);
 
-  return reviewed;
+  onProgress?.({ stage: 4, label: 'Лаура (финансист): расчёт стоимости, пошлины, НДС...' });
+  const laura = agentLaura(reviewed, options.mode, options.value, options.defaultPricePerKg);
+
+  onProgress?.({ stage: 5, label: 'Маке (главный): финальная приёмка инвойса...' });
+  const make = await agentMake(laura);
+
+  if (!make.approved) {
+    throw new Error(
+      `Маке (Главный): инвойс не одобрен — ${make.warnings.join('; ') || 'без указания причины'}`,
+    );
+  }
+
+  return {
+    items: laura.items,
+    financials: laura.totals,
+    laura_notes: laura.notes,
+    make,
+  };
 }

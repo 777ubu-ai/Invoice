@@ -26,19 +26,38 @@ async function main() {
     }
   }
 
-  console.log('\n=== Running 3-agent pipeline ===');
+  console.log('\n=== Running 5-agent pipeline (Лаура + Маке) ===');
   const fileText = rowsAsText(parsed);
-  const reviewed = await runClassificationPipeline(fileText, (p) => {
-    console.log(`[stage ${p.stage}] ${p.label}`);
-  });
+  const result = await runClassificationPipeline(
+    fileText,
+    { mode: 'TARGET_PAYMENTS', value: 8500, defaultPricePerKg: 0.75 },
+    (p) => {
+      console.log(`[stage ${p.stage}] ${p.label}`);
+    },
+  );
+  const reviewed = result.items;
 
   console.log(`\n=== Pipeline returned ${reviewed.length} items ===`);
-  reviewed.slice(0, 10).forEach((it, idx) => {
+  console.log('\n--- Лаура (финансист) ---');
+  console.log(`Стоимость партии: $${result.financials.cost_usd}`);
+  console.log(`Пошлина (сумма):  $${result.financials.duty_usd}`);
+  console.log(`НДС 16%:          $${result.financials.vat_usd}`);
+  console.log(`Сбор тамож.:      $${result.financials.fee_usd}`);
+  console.log(`ИТОГО ПЛАТЕЖЕЙ:   $${result.financials.total_payments_usd} (цель $${result.financials.target_usd})`);
+  console.log(`Заметка:          ${result.laura_notes}`);
+  console.log('\n--- Маке (главный) ---');
+  console.log(`approved: ${result.make.approved}`);
+  console.log(`warnings: ${result.make.warnings.join(' | ') || '—'}`);
+  console.log(`notes:    ${result.make.notes}`);
+
+  console.log('\n--- Первые 5 позиций ---');
+  reviewed.slice(0, 5).forEach((it, idx) => {
     console.log(
       `\n${idx + 1}. ${it.article} — ${it.text_translated}\n` +
         `   qty=${it.quantity} gross=${it.gross_kg}kg net=${it.net_kg}kg\n` +
         `   TN VED: ${it.tnved_code} — ${it.tnved_description}\n` +
         `   duty=${it.duty_rate}% confidence=${it.confidence}%${it.needs_review ? ' ⚠️ нужна проверка' : ''}\n` +
+        `   cost=$${it.cost_usd} duty=$${it.duty_usd} vat=$${it.vat_usd}\n` +
         `   reasoning: ${it.reasoning}` +
         (it.review_reason ? `\n   reviewer: ${it.review_reason}` : ''),
     );

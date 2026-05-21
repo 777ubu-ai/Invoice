@@ -4,11 +4,7 @@ import { join } from 'node:path';
 import ExcelJS from 'exceljs';
 import { supabase } from './supabase.js';
 import { logger } from '../utils/logger.js';
-import {
-  runClassificationPipeline,
-  isClaudeEnabled,
-  type ReviewedItem,
-} from './classifier.js';
+import { runClassificationPipeline, isClaudeEnabled } from './classifier.js';
 import { fetchTelegramFile } from './file-fetcher.js';
 import { parseXlsxBuffer, rowsAsText } from './xlsx-parser.js';
 import type {
@@ -17,6 +13,7 @@ import type {
   InvoiceItem,
   InvoiceState,
   InvoiceStatus,
+  InvoiceSummary,
   PriceMode,
   TnvedHit,
   UploadInput,
@@ -54,9 +51,15 @@ function parseSourceFileUrl(
   return { fileId, fileName };
 }
 
-// Download the uploaded packing list, parse xlsx, run the 3-agent pipeline.
+// Download the uploaded packing list, parse xlsx, run the full 5-agent pipeline
+// (Переводчик → Классификатор → Ревьюер → Лаура → Маке).
 // Throws (with a Russian error message) on any failure — no silent fallback.
-async function classifyFromUploadedFile(fileRef: string): Promise<InvoiceItem[]> {
+async function classifyFromUploadedFile(
+  fileRef: string,
+  clientName: string,
+  mode: PriceMode,
+  value: number | undefined,
+): Promise<{ items: InvoiceItem[]; summary: InvoiceSummary }> {
   const parsed = parseSourceFileUrl(fileRef);
   if (!parsed) {
     throw new Error('Не удалось разобрать ссылку на файл. Попробуй заново.');
@@ -81,15 +84,19 @@ async function classifyFromUploadedFile(fileRef: string): Promise<InvoiceItem[]>
   logger.info({ fileName, rows: parsedXlsx.totalRows }, 'parsed xlsx');
 
   const fileText = rowsAsText(parsedXlsx);
-  const reviewed: ReviewedItem[] = await runClassificationPipeline(fileText, (p) => {
-    logger.info({ stage: p.stage, label: p.label }, 'pipeline progress');
-  });
+  const result = await runClassificationPipeline(
+    fileText,
+    { mode, value, defaultPricePerKg: defaultPricePerKgFor(clientName) },
+    (p) => {
+      logger.info({ stage: p.stage, label: p.label }, 'pipeline progress');
+    },
+  );
 
-  if (reviewed.length === 0) {
+  if (result.items.length === 0) {
     throw new Error('Pipeline вернул 0 позиций.');
   }
 
-  return reviewed.map((it, idx) => ({
+  const items: InvoiceItem[] = result.items.map((it, idx) => ({
     index: idx + 1,
     article: it.article || `ITEM-${idx + 1}`,
     text_original: it.text_original || '',
@@ -105,58 +112,37 @@ async function classifyFromUploadedFile(fileRef: string): Promise<InvoiceItem[]>
     review_reason: it.review_reason,
     reasoning: it.reasoning,
     alternatives: it.alternatives,
+    cost_usd: it.cost_usd,
+    duty_usd: it.duty_usd,
+    vat_usd: it.vat_usd,
   }));
-}
 
-
-function computeSummary(
-  items: InvoiceItem[],
-  mode: PriceMode,
-  value: number | undefined,
-): InvoiceState['summary'] {
-  const gross = items.reduce((s, i) => s + i.gross_kg, 0);
-  const net = items.reduce((s, i) => s + i.net_kg, 0);
-  const units = items.reduce((s, i) => s + i.quantity, 0);
-
-  // Cost backsolved to hit `value` total payments when mode is TARGET_PAYMENTS.
-  // Fixed cost for other modes to keep mock deterministic.
-  // Customs fee: 26 000 KZT fixed (≈ $54 at 480 KZT/USD).
-  const CUSTOMS_FEE_USD = 54;
-
-  let cost: number;
-  if (mode === 'TARGET_PAYMENTS' && value) {
-    // duty + vat(16%) + fee ≈ value;  cost is the major source — fit numerically.
-    const avgDuty = 0.066;
-    const vatRate = 0.16;
-    const denom = avgDuty + vatRate * (1 + avgDuty);
-    cost = Math.round((value - CUSTOMS_FEE_USD) / denom);
-  } else if (mode === 'PRICE_PER_KG' && value) {
-    cost = Math.round(net * value);
-  } else {
-    cost = 20875;
-  }
-
-  const duty = Math.round(
-    items.reduce((s, i) => s + (cost * i.gross_kg) / gross * (i.duty_rate / 100), 0),
-  );
-  const vat = Math.round((cost + duty) * 0.16);
-  const fee = CUSTOMS_FEE_USD;
-  const total = duty + vat + fee;
-
-  return {
+  const summary: InvoiceSummary = {
     items_count: items.length,
     codes_count: new Set(items.map((i) => i.tnved_code)).size,
-    gross_kg: gross,
-    net_kg: net,
-    units_total: units,
-    cost_usd: cost,
-    duty_usd: duty,
-    vat_usd: vat,
-    fee_usd: fee,
-    total_payments_usd: total,
-    target_usd: mode === 'TARGET_PAYMENTS' ? value : undefined,
+    gross_kg: result.financials.gross_kg,
+    net_kg: result.financials.net_kg,
+    units_total: result.financials.units,
+    cost_usd: result.financials.cost_usd,
+    duty_usd: result.financials.duty_usd,
+    vat_usd: result.financials.vat_usd,
+    fee_usd: result.financials.fee_usd,
+    total_payments_usd: result.financials.total_payments_usd,
+    target_usd: result.financials.target_usd,
+    laura_notes: result.laura_notes,
+    make_approved: result.make.approved,
+    make_warnings: result.make.warnings,
+    make_notes: result.make.notes,
   };
+
+  return { items, summary };
 }
+
+function defaultPricePerKgFor(clientName: string): number {
+  if (/LINEA TRANSIT/i.test(clientName)) return 0.75;
+  return 0.75;
+}
+
 
 async function setInvoiceFields(
   invoiceId: string,
@@ -266,6 +252,7 @@ interface MergedRow {
   quantity: number;
   net_kg: number;
   gross_kg: number;
+  cost_usd: number;
 }
 
 function groupItemsByCode(items: InvoiceItem[]): MergedRow[] {
@@ -283,6 +270,7 @@ function groupItemsByCode(items: InvoiceItem[]): MergedRow[] {
       existing.quantity += it.quantity || 0;
       existing.net_kg += it.net_kg || 0;
       existing.gross_kg += it.gross_kg || 0;
+      existing.cost_usd += it.cost_usd || 0;
       existing.source_count += 1;
     } else {
       map.set(code, {
@@ -293,6 +281,7 @@ function groupItemsByCode(items: InvoiceItem[]): MergedRow[] {
         quantity: it.quantity || 0,
         net_kg: it.net_kg || 0,
         gross_kg: it.gross_kg || 0,
+        cost_usd: it.cost_usd || 0,
       });
     }
   }
@@ -308,6 +297,7 @@ function groupItemsByCode(items: InvoiceItem[]): MergedRow[] {
     }
     row.net_kg = Math.round(row.net_kg * 100) / 100;
     row.gross_kg = Math.round(row.gross_kg * 100) / 100;
+    row.cost_usd = Math.round(row.cost_usd * 100) / 100;
   }
   // Sort by gross weight desc so the biggest categories come first.
   return [...map.values()].sort((a, b) => b.gross_kg - a.gross_kg);
@@ -384,9 +374,10 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
   ws.getRow(HEADER_ROW).height = 32;
 
   // ---------- Item rows (grouped by ТН ВЭД code) ----------
+  // Стоимость берём из расчёта Лауры (cost_usd на каждой позиции). Пишем как
+  // число с кешированным значением формулы — Telegram/preview покажут сразу.
   const groupedRows = groupItemsByCode(items);
   const START_ROW = HEADER_ROW + 1;
-  const PRICE = profile.pricePerNetKg;
   groupedRows.forEach((row, idx) => {
     const r = START_ROW + idx;
     if (idx === 0) {
@@ -401,7 +392,7 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
     ws.getCell(`E${r}`).value = row.quantity;
     ws.getCell(`F${r}`).value = row.net_kg;
     ws.getCell(`G${r}`).value = row.gross_kg;
-    ws.getCell(`H${r}`).value = { formula: `F${r}*${PRICE}` };
+    ws.getCell(`H${r}`).value = row.cost_usd;
     ws.getCell(`H${r}`).numFmt = '#,##0.00';
 
     for (let c = 1; c <= 8; c++) {
@@ -414,16 +405,22 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
     }
   });
 
-  // ---------- ИТОГО row ----------
+  // ---------- ИТОГО row + блок налогов ----------
   if (groupedRows.length > 0) {
     const lastItemRow = START_ROW + groupedRows.length - 1;
     const totalRow = lastItemRow + 2;
+    const totalNet = groupedRows.reduce((s, r) => s + r.net_kg, 0);
+    const totalGross = groupedRows.reduce((s, r) => s + r.gross_kg, 0);
+    const totalQty = groupedRows.reduce((s, r) => s + r.quantity, 0);
+    const totalPlaces = groupedRows.reduce((s, r) => s + r.source_count, 0);
+    const totalCost = groupedRows.reduce((s, r) => s + r.cost_usd, 0);
+
     ws.getCell(`C${totalRow}`).value = 'ИТОГО:';
-    ws.getCell(`D${totalRow}`).value = { formula: `SUM(D${START_ROW}:D${lastItemRow})` };
-    ws.getCell(`E${totalRow}`).value = { formula: `SUM(E${START_ROW}:E${lastItemRow})` };
-    ws.getCell(`F${totalRow}`).value = { formula: `SUM(F${START_ROW}:F${lastItemRow})` };
-    ws.getCell(`G${totalRow}`).value = { formula: `SUM(G${START_ROW}:G${lastItemRow})` };
-    ws.getCell(`H${totalRow}`).value = { formula: `SUM(H${START_ROW}:H${lastItemRow})` };
+    ws.getCell(`D${totalRow}`).value = totalPlaces;
+    ws.getCell(`E${totalRow}`).value = totalQty;
+    ws.getCell(`F${totalRow}`).value = Math.round(totalNet * 100) / 100;
+    ws.getCell(`G${totalRow}`).value = Math.round(totalGross * 100) / 100;
+    ws.getCell(`H${totalRow}`).value = Math.round(totalCost * 100) / 100;
     ws.getCell(`H${totalRow}`).numFmt = '#,##0.00';
     for (let c = 1; c <= 8; c++) {
       ws.getRow(totalRow).getCell(c).font = { bold: true };
@@ -433,6 +430,24 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
         left: { style: 'thin' },
         right: { style: 'thin' },
       };
+    }
+
+    // Блок с финальной сводкой Лауры — пошлина, НДС, сбор, итого платежей.
+    const s = invoice.summary;
+    if (s && typeof s.cost_usd === 'number') {
+      let r = totalRow + 2;
+      const writeKV = (k: string, v: string | number) => {
+        ws.getCell(`F${r}`).value = k;
+        ws.getCell(`F${r}`).font = { bold: true };
+        ws.getCell(`H${r}`).value = typeof v === 'number' ? Math.round(v * 100) / 100 : v;
+        if (typeof v === 'number') ws.getCell(`H${r}`).numFmt = '#,##0.00';
+        r += 1;
+      };
+      writeKV('Стоимость партии, $:', s.cost_usd);
+      writeKV('Пошлина, $:', s.duty_usd);
+      writeKV('НДС 16%, $:', s.vat_usd);
+      writeKV('Таможенный сбор, $:', s.fee_usd);
+      writeKV('ВСЕГО ПЛАТЕЖЕЙ, $:', s.total_payments_usd);
     }
   }
 
@@ -521,8 +536,12 @@ export class MockApiClient implements ApiClient {
             throw new Error('Файл packing list не привязан к инвойсу. Попробуй /new заново.');
           }
 
-          const items = await classifyFromUploadedFile(fileRef);
-          const summary = computeSummary(items, mode, value);
+          const { items, summary } = await classifyFromUploadedFile(
+            fileRef,
+            inv.client_name,
+            mode,
+            value,
+          );
           await setInvoiceFields(invoiceId, {
             status: 'REVIEW' as InvoiceStatus,
             items,

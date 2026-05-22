@@ -7,6 +7,7 @@ import { getById, reassign } from '../services/invoices.repo.js';
 import { listOperatorsByManager, deactivateUser } from '../services/users.repo.js';
 import { notifyUser } from '../services/notifications.js';
 import { reviewKeyboard, itemKeyboard } from '../keyboards/review.kb.js';
+import { recordFeedback } from '../services/tnved-feedback.repo.js';
 import { reassignKeyboard } from '../keyboards/team.kb.js';
 import { invoiceSummaryText } from '../utils/format.js';
 
@@ -94,6 +95,68 @@ callbacks.callbackQuery(/^inv:keep:([^:]+):(\d+)$/, async (ctx) => {
 
 callbacks.callbackQuery(/^inv:noop:.+$/, async (ctx) => {
   await ctx.answerCallbackQuery('Открой результирующий xlsx — все позиции там.');
+});
+
+callbacks.callbackQuery(/^inv:fbgood:([^:]+):(\d+)$/, async (ctx) => {
+  const invoiceId = ctx.match[1]!;
+  const index = Number(ctx.match[2]);
+  const inv = await getById(invoiceId);
+  const item = inv?.items?.find((i) => i.index === index);
+  if (!item) {
+    await ctx.answerCallbackQuery('Позиция не найдена.');
+    return;
+  }
+  try {
+    await recordFeedback({
+      code: item.tnved_code,
+      verdict: 'good',
+      context: item.text_translated || item.text_original,
+      invoiceId,
+      itemIndex: index,
+      reportedById: ctx.dbUser?.id,
+    });
+    await audit({
+      actor_user_id: ctx.dbUser?.id ?? null,
+      action: 'TNVED_FEEDBACK_GOOD',
+      target_type: 'invoice',
+      target_id: invoiceId,
+      payload: { index, code: item.tnved_code },
+    });
+    await ctx.answerCallbackQuery(`👍 Код ${item.tnved_code} занесён в белый список.`);
+  } catch {
+    await ctx.answerCallbackQuery('Не удалось сохранить — попробуй ещё раз.');
+  }
+});
+
+callbacks.callbackQuery(/^inv:fbbad:([^:]+):(\d+)$/, async (ctx) => {
+  const invoiceId = ctx.match[1]!;
+  const index = Number(ctx.match[2]);
+  const inv = await getById(invoiceId);
+  const item = inv?.items?.find((i) => i.index === index);
+  if (!item) {
+    await ctx.answerCallbackQuery('Позиция не найдена.');
+    return;
+  }
+  try {
+    await recordFeedback({
+      code: item.tnved_code,
+      verdict: 'bad',
+      context: item.text_translated || item.text_original,
+      invoiceId,
+      itemIndex: index,
+      reportedById: ctx.dbUser?.id,
+    });
+    await audit({
+      actor_user_id: ctx.dbUser?.id ?? null,
+      action: 'TNVED_FEEDBACK_BAD',
+      target_type: 'invoice',
+      target_id: invoiceId,
+      payload: { index, code: item.tnved_code },
+    });
+    await ctx.answerCallbackQuery(`🚩 Код ${item.tnved_code} помечен как неверный. Маке учтёт в будущем.`);
+  } catch {
+    await ctx.answerCallbackQuery('Не удалось сохранить — попробуй ещё раз.');
+  }
 });
 
 callbacks.callbackQuery(/^inv:pick:([^:]+):(\d+):(\d+)$/, async (ctx) => {

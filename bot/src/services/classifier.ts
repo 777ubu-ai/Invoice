@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { loadFeedbackStats, isLikelyBad } from './tnved-feedback.repo.js';
 
 // =============================================================================
 // Multi-agent classification pipeline.
@@ -630,6 +631,28 @@ export async function agentMake(report: LauraReport): Promise<MakeVerdict> {
     const head = `Подозрительные 10-значные суффиксы (${suspiciousCodes.length} шт) — нужна проверка брокером:`;
     parsed.warnings = [head, ...suspiciousCodes.slice(0, 10), ...(parsed.warnings ?? [])];
     if (suspiciousCodes.length > 10) parsed.warnings.push(`…и ещё ${suspiciousCodes.length - 10} позиций`);
+  }
+
+  // Lookup against accumulated operator/broker feedback in Supabase.
+  // Codes marked 'bad' by humans in past invoices → strong warning.
+  // Codes marked 'good' → not even worth flagging (broker has verified).
+  const stats = await loadFeedbackStats().catch(() => new Map());
+  const blacklisted: string[] = [];
+  for (const it of report.items) {
+    const s = stats.get(it.tnved_code);
+    if (isLikelyBad(s)) {
+      const alt = s!.suggested_alternatives[0]
+        ? ` (брокер ранее предлагал: ${s!.suggested_alternatives[0]})`
+        : '';
+      blacklisted.push(`#${it.index} «${it.text_translated || it.text_original}» — ${it.tnved_code} помечен брокером как НЕВЕРНЫЙ ${s!.bad} раз${alt}`);
+    }
+  }
+  if (blacklisted.length > 0) {
+    parsed.warnings = [
+      `🚩 Коды из чёрного списка брокера (${blacklisted.length} шт):`,
+      ...blacklisted.slice(0, 10),
+      ...(parsed.warnings ?? []),
+    ];
   }
 
   const approved = parsed.approved && hardFailures.length === 0;

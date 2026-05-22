@@ -32,6 +32,10 @@ export function itemKeyboard(invoiceId: string, item: InvoiceItem): InlineKeyboa
     kb.text(`Выбрать ${alt.code}`, `inv:pick:${invoiceId}:${item.index}:${alt.code}`).row();
     if (++i > 4) break;
   }
+  // Накопительная обратная связь для Маке.
+  kb.text(`👍 Код верный`, `inv:fbgood:${invoiceId}:${item.index}`)
+    .text(`🚩 Код неверный`, `inv:fbbad:${invoiceId}:${item.index}`)
+    .row();
   kb.text('🔙 К инвойсу', `inv:back:${invoiceId}`);
   return kb;
 }

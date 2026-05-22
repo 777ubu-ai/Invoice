@@ -92,6 +92,10 @@ callbacks.callbackQuery(/^inv:keep:([^:]+):(\d+)$/, async (ctx) => {
   }
 });
 
+callbacks.callbackQuery(/^inv:noop:.+$/, async (ctx) => {
+  await ctx.answerCallbackQuery('Открой результирующий xlsx — все позиции там.');
+});
+
 callbacks.callbackQuery(/^inv:pick:([^:]+):(\d+):(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery('✓ Применено');
   const invoiceId = ctx.match[1]!;

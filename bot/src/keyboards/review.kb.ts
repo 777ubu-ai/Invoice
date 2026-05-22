@@ -3,9 +3,21 @@ import type { InvoiceItem, InvoiceState } from '../services/api.types.js';
 
 export function reviewKeyboard(inv: InvoiceState): InlineKeyboard {
   const kb = new InlineKeyboard();
-  const review = (inv.items ?? []).filter((i) => i.needs_review);
-  for (const it of review) {
-    kb.text(`👁 Посмотреть #${it.index}`, `inv:item:${inv.id}:${it.index}`).row();
+  const items = inv.items ?? [];
+  // Сначала позиции на ревью, потом остальные — чтобы первыми видны были спорные.
+  const sorted = [...items].sort((a, b) => {
+    if (a.needs_review !== b.needs_review) return a.needs_review ? -1 : 1;
+    return a.confidence - b.confidence;
+  });
+  // Показываем до 30 кнопок чтобы не упереться в лимит Telegram (100 кнопок на сообщение).
+  const visible = sorted.slice(0, 30);
+  for (const it of visible) {
+    const flag = it.needs_review ? '⚠️' : '✏️';
+    const label = `${flag} #${it.index} ${it.tnved_code} (${it.confidence}%)`;
+    kb.text(label, `inv:item:${inv.id}:${it.index}`).row();
+  }
+  if (items.length > visible.length) {
+    kb.text(`…ещё ${items.length - visible.length} позиций (открой xlsx)`, `inv:noop:${inv.id}`).row();
   }
   kb.text('✅ Одобрить', `inv:approve:${inv.id}`).text('❌ Отменить', `inv:cancel:${inv.id}`);
   return kb;

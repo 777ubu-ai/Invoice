@@ -44,10 +44,19 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
     throw new Error('Telegram вернул ответ без file_path. Попробуй заново /new.');
   }
 
-  // Path normalization: cloud API returns relative paths ("documents/file_12.xlsx"),
-  // self-hosted Local Bot API returns absolute local paths ("/var/lib/.../file.xlsx").
-  // Both work over the same HTTP route once the leading slash is normalized.
-  const filePath = meta.result.file_path.replace(/^\/+/, '');
+  // Path normalization:
+  //   - cloud API returns relative paths: "documents/file_12.xlsx"
+  //   - self-hosted Local Bot API (--local mode) returns absolute filesystem
+  //     paths: "/var/lib/telegram-bot-api/<bot_id>/documents/file_12.xlsx"
+  // The HTTP file endpoint expects the path RELATIVE to --dir, so strip the
+  // working-dir prefix before building the URL.
+  const TELEGRAM_DATA_DIR = '/var/lib/telegram-bot-api/';
+  let filePath = meta.result.file_path;
+  if (filePath.startsWith(TELEGRAM_DATA_DIR)) {
+    filePath = filePath.slice(TELEGRAM_DATA_DIR.length);
+  } else {
+    filePath = filePath.replace(/^\/+/, '');
+  }
   const dlUrl = `${apiBase}/file/bot${token}/${filePath}`;
   const dlRes = await fetch(dlUrl);
   if (!dlRes.ok) {

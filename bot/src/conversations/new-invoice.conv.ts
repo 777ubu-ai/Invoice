@@ -5,6 +5,7 @@ import { audit } from '../services/audit.repo.js';
 import { priceModeKeyboard, clientsKeyboard, reviewKeyboard } from '../keyboards/review.kb.js';
 import { invoiceSummaryText } from '../utils/format.js';
 import { logger } from '../utils/logger.js';
+import { env } from '../config/env.js';
 import type { PriceMode } from '../services/api.types.js';
 
 const PRICE_MODE_LABEL: Record<PriceMode, string> = {
@@ -54,8 +55,12 @@ export async function newInvoiceConversation(
   let fileName = 'packing-list';
   let fileUrl: string | undefined;
   let fileSize = 0;
-  // Лимит Telegram Bot API на скачивание = 20 МБ. Дальше getFile вернёт 400.
-  const TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
+  // Лимит зависит от того где живёт Bot API:
+  //   - api.telegram.org → 20 МБ
+  //   - локальный telegram-bot-api сервер (TELEGRAM_API_ROOT задан) → 2 ГБ
+  const downloadLimit = env.TELEGRAM_API_ROOT
+    ? 2 * 1024 * 1024 * 1024
+    : 20 * 1024 * 1024;
   if (fileMsg.message?.document) {
     fileName = fileMsg.message.document.file_name ?? fileName;
     fileUrl = `tg:${fileMsg.message.document.file_id}`;
@@ -68,17 +73,21 @@ export async function newInvoiceConversation(
       fileSize = ph.file_size ?? 0;
     }
   }
-  logger.info({ fileName, fileUrl, fileSize }, 'received packing list');
+  logger.info(
+    { fileName, fileUrl, fileSize, hasLocalApi: Boolean(env.TELEGRAM_API_ROOT) },
+    'received packing list',
+  );
 
-  if (fileSize > TELEGRAM_DOWNLOAD_LIMIT) {
+  if (fileSize > downloadLimit) {
     const mb = (fileSize / 1024 / 1024).toFixed(1);
+    const limitLabel = env.TELEGRAM_API_ROOT ? '2 ГБ (локальный сервер)' : '20 МБ (api.telegram.org)';
     await ctx.reply(
-      `❌ Файл ${mb} МБ — больше лимита Telegram Bot API (20 МБ).\n\n` +
+      `❌ Файл ${mb} МБ — больше лимита ${limitLabel}.\n\n` +
         `Что делать:\n` +
         `1. Открой файл в Excel → "Сохранить как" → выбери .xlsx (не .xlsb / .xls)\n` +
         `2. Удали ненужные листы (часто в packing list есть пустые / служебные)\n` +
         `3. Удали изображения если они вшиты в ячейки\n` +
-        `4. Если всё равно > 20 МБ — разбей на 2 файла по диапазону строк и пришли по очереди`,
+        `4. Если всё равно слишком большой — разбей на 2 файла по диапазону строк`,
     );
     return;
   }

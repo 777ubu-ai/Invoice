@@ -12,12 +12,33 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
 
   const metaUrl = `https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`;
   const metaRes = await fetch(metaUrl);
-  if (!metaRes.ok) {
-    throw new Error(`Telegram getFile HTTP ${metaRes.status}`);
+  // Telegram returns 4xx with a JSON body that explains the real reason
+  // ("file is too big", "wrong file_id", "file expired"). Surface it so the
+  // operator sees the actual problem, not just "HTTP 400".
+  const rawBody = await metaRes.text();
+  let meta: GetFileResponse = {} as GetFileResponse;
+  try {
+    meta = JSON.parse(rawBody) as GetFileResponse;
+  } catch {
+    /* leave meta empty */
   }
-  const meta = (await metaRes.json()) as GetFileResponse;
-  if (!meta.ok || !meta.result?.file_path) {
-    throw new Error(`Telegram getFile failed: ${meta.description ?? 'no file_path'}`);
+  if (!metaRes.ok || !meta.ok) {
+    const desc = meta.description ?? rawBody.slice(0, 200);
+    logger.warn({ fileId, status: metaRes.status, desc }, 'telegram getFile failed');
+    if (/file is too big/i.test(desc)) {
+      throw new Error(
+        'Файл больше 20 МБ — это лимит Telegram Bot API. Сохрани xlsx без картинок/служебных листов или разбей на 2 файла.',
+      );
+    }
+    if (/wrong file_id|file_id_invalid|expired/i.test(desc)) {
+      throw new Error(
+        'Ссылка на файл устарела или повреждена. Пришли packing list ещё раз через /new.',
+      );
+    }
+    throw new Error(`Telegram getFile отказал: ${desc}`);
+  }
+  if (!meta.result?.file_path) {
+    throw new Error('Telegram вернул ответ без file_path. Попробуй заново /new.');
   }
 
   const dlUrl = `https://api.telegram.org/file/bot${token}/${meta.result.file_path}`;

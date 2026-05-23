@@ -53,15 +53,35 @@ export async function newInvoiceConversation(
   const fileMsg = await conversation.waitFor([':document', ':photo']);
   let fileName = 'packing-list';
   let fileUrl: string | undefined;
+  let fileSize = 0;
+  // Лимит Telegram Bot API на скачивание = 20 МБ. Дальше getFile вернёт 400.
+  const TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
   if (fileMsg.message?.document) {
     fileName = fileMsg.message.document.file_name ?? fileName;
     fileUrl = `tg:${fileMsg.message.document.file_id}`;
+    fileSize = fileMsg.message.document.file_size ?? 0;
   } else if (fileMsg.message?.photo) {
     fileName = 'packing-list.jpg';
     const ph = fileMsg.message.photo[fileMsg.message.photo.length - 1];
-    if (ph) fileUrl = `tg:${ph.file_id}`;
+    if (ph) {
+      fileUrl = `tg:${ph.file_id}`;
+      fileSize = ph.file_size ?? 0;
+    }
   }
-  logger.info({ fileName, fileUrl }, 'received packing list');
+  logger.info({ fileName, fileUrl, fileSize }, 'received packing list');
+
+  if (fileSize > TELEGRAM_DOWNLOAD_LIMIT) {
+    const mb = (fileSize / 1024 / 1024).toFixed(1);
+    await ctx.reply(
+      `❌ Файл ${mb} МБ — больше лимита Telegram Bot API (20 МБ).\n\n` +
+        `Что делать:\n` +
+        `1. Открой файл в Excel → "Сохранить как" → выбери .xlsx (не .xlsb / .xls)\n` +
+        `2. Удали ненужные листы (часто в packing list есть пустые / служебные)\n` +
+        `3. Удали изображения если они вшиты в ячейки\n` +
+        `4. Если всё равно > 20 МБ — разбей на 2 файла по диапазону строк и пришли по очереди`,
+    );
+    return;
+  }
 
   // 3. Upload to API (creates invoice row).
   const upload = await api.uploadFile({

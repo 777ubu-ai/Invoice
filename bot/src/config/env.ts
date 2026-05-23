@@ -9,6 +9,11 @@ const schema = z.object({
 
   TELEGRAM_BOT_TOKEN: z.string().min(20, 'TELEGRAM_BOT_TOKEN is required'),
 
+  // Опциональный URL локального Bot API сервера (telegram-bot-api / aiogram image).
+  // Если задан — лимит на скачивание/загрузку файла становится 2 ГБ (вместо 20 МБ
+  // у официального api.telegram.org). Пример: http://tg-bot-api.railway.internal:8081
+  TELEGRAM_API_ROOT: z.string().url().optional(),
+
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_KEY: z.string().min(20),
 

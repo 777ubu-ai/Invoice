@@ -9,8 +9,11 @@ interface GetFileResponse {
 
 export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
   const token = env.TELEGRAM_BOT_TOKEN;
+  // Если поднят локальный Bot API сервер — все запросы идут на него и лимит
+  // 20 МБ снимается. Иначе fallback на официальный api.telegram.org.
+  const apiBase = env.TELEGRAM_API_ROOT ?? 'https://api.telegram.org';
 
-  const metaUrl = `https://api.telegram.org/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`;
+  const metaUrl = `${apiBase}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`;
   const metaRes = await fetch(metaUrl);
   // Telegram returns 4xx with a JSON body that explains the real reason
   // ("file is too big", "wrong file_id", "file expired"). Surface it so the
@@ -41,7 +44,11 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
     throw new Error('Telegram вернул ответ без file_path. Попробуй заново /new.');
   }
 
-  const dlUrl = `https://api.telegram.org/file/bot${token}/${meta.result.file_path}`;
+  // Path normalization: cloud API returns relative paths ("documents/file_12.xlsx"),
+  // self-hosted Local Bot API returns absolute local paths ("/var/lib/.../file.xlsx").
+  // Both work over the same HTTP route once the leading slash is normalized.
+  const filePath = meta.result.file_path.replace(/^\/+/, '');
+  const dlUrl = `${apiBase}/file/bot${token}/${filePath}`;
   const dlRes = await fetch(dlUrl);
   if (!dlRes.ok) {
     throw new Error(`Telegram file download HTTP ${dlRes.status}`);

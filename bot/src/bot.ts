@@ -35,7 +35,15 @@ import { setBotApi } from './services/notifications.js';
 import { logger } from './utils/logger.js';
 
 export function buildBot(): Bot<BotContext> {
-  const bot = new Bot<BotContext>(env.TELEGRAM_BOT_TOKEN);
+  // Если у нас поднят свой Local Bot API Server — направляем grammY на него.
+  // Тогда лимит на скачивание файлов = 2 ГБ вместо 20 МБ.
+  const clientConfig = env.TELEGRAM_API_ROOT
+    ? { client: { apiRoot: env.TELEGRAM_API_ROOT } }
+    : {};
+  const bot = new Bot<BotContext>(env.TELEGRAM_BOT_TOKEN, clientConfig);
+  if (env.TELEGRAM_API_ROOT) {
+    logger.info({ apiRoot: env.TELEGRAM_API_ROOT }, 'using local Telegram Bot API server');
+  }
   setBotApi(bot.api);
 
   bot.use(session<SessionData, BotContext>({ initial: () => ({}) }));

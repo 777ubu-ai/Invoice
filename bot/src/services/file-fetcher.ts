@@ -44,28 +44,50 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
     throw new Error('Telegram вернул ответ без file_path. Попробуй заново /new.');
   }
 
-  // Path normalization:
-  //   - cloud API returns relative paths: "documents/file_12.xlsx"
-  //   - self-hosted Local Bot API (--local mode) returns absolute filesystem
-  //     paths: "/var/lib/telegram-bot-api/<bot_id>/documents/file_12.xlsx"
-  // The HTTP file endpoint expects the path RELATIVE to --dir, so strip the
-  // working-dir prefix before building the URL.
-  const TELEGRAM_DATA_DIR = '/var/lib/telegram-bot-api/';
-  let filePath = meta.result.file_path;
-  if (filePath.startsWith(TELEGRAM_DATA_DIR)) {
-    filePath = filePath.slice(TELEGRAM_DATA_DIR.length);
-  } else {
-    filePath = filePath.replace(/^\/+/, '');
-  }
-  const dlUrl = `${apiBase}/file/bot${token}/${filePath}`;
-  const dlRes = await fetch(dlUrl);
-  if (!dlRes.ok) {
-    throw new Error(`Telegram file download HTTP ${dlRes.status}`);
-  }
-  const buf = Buffer.from(await dlRes.arrayBuffer());
-  logger.info(
-    { fileId, bytes: buf.length, path: meta.result.file_path },
-    'telegram file downloaded',
+  // Path normalization for Local Bot API: --local mode returns an ABSOLUTE
+  // filesystem path like "/var/lib/telegram-bot-api/<bot_id>/documents/file.xlsx",
+  // but different aiogram image versions / configs expose different HTTP URL
+  // shapes. Cloud API returns a relative path. To survive both, try several
+  // candidate URLs and pick the first one that works.
+  const rawPath = meta.result.file_path;
+  const botId = token.split(':')[0]!;
+  const candidates = Array.from(
+    new Set([
+      // Strip data-dir + bot-id prefix → leaves "documents/file.xlsx"
+      `${apiBase}/file/bot${token}/${stripPrefix(rawPath, [`/var/lib/telegram-bot-api/${botId}/`, `/var/lib/telegram-bot-api/`])}`,
+      // Strip only leading slashes
+      `${apiBase}/file/bot${token}/${rawPath.replace(/^\/+/, '')}`,
+      // Keep leading slash → "//var/lib/..."
+      `${apiBase}/file/bot${token}${rawPath.startsWith('/') ? rawPath : '/' + rawPath}`,
+    ]),
   );
-  return buf;
+
+  logger.info({ fileId, rawPath, apiBase, candidates }, 'attempting telegram file download');
+
+  let lastError: { url: string; status: number; body: string } | null = null;
+  for (const url of candidates) {
+    const dlRes = await fetch(url);
+    if (dlRes.ok) {
+      const buf = Buffer.from(await dlRes.arrayBuffer());
+      logger.info(
+        { fileId, bytes: buf.length, urlUsed: url, rawPath },
+        'telegram file downloaded',
+      );
+      return buf;
+    }
+    const body = (await dlRes.text()).slice(0, 200);
+    lastError = { url, status: dlRes.status, body };
+    logger.warn({ url, status: dlRes.status, body }, 'download attempt failed, trying next URL');
+  }
+  throw new Error(
+    `Telegram file download failed (${candidates.length} URLs tried). ` +
+      `Last: HTTP ${lastError?.status} from ${lastError?.url} — ${lastError?.body}`,
+  );
+}
+
+function stripPrefix(path: string, prefixes: string[]): string {
+  for (const p of prefixes) {
+    if (path.startsWith(p)) return path.slice(p.length);
+  }
+  return path.replace(/^\/+/, '');
 }

@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 
@@ -9,15 +10,13 @@ interface GetFileResponse {
 
 export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
   const token = env.TELEGRAM_BOT_TOKEN;
-  // Если поднят локальный Bot API сервер — все запросы идут на него и лимит
-  // 20 МБ снимается. Иначе fallback на официальный api.telegram.org.
+  // If a local Bot API server is configured (TELEGRAM_API_ROOT set), all
+  // requests — including getFile — go through it. Otherwise fall back to
+  // the official api.telegram.org (20MB download limit).
   const apiBase = env.TELEGRAM_API_ROOT ?? 'https://api.telegram.org';
 
   const metaUrl = `${apiBase}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`;
   const metaRes = await fetch(metaUrl);
-  // Telegram returns 4xx with a JSON body that explains the real reason
-  // ("file is too big", "wrong file_id", "file expired"). Surface it so the
-  // operator sees the actual problem, not just "HTTP 400".
   const rawBody = await metaRes.text();
   let meta: GetFileResponse = {} as GetFileResponse;
   try {
@@ -44,31 +43,39 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
     throw new Error('Telegram вернул ответ без file_path. Попробуй заново /new.');
   }
 
-  // Path normalization for Local Bot API: --local mode returns an absolute
-  // filesystem path. The actual format observed in production is:
-  //   /var/lib/telegram-bot-api/<FULL_BOT_TOKEN>/documents/file_0.xlsx
-  // where <FULL_BOT_TOKEN> is "<id>:<hash>" (the entire bot token, not just
-  // the numeric id). The HTTP file endpoint expects the path relative to the
-  // bot's working directory, i.e. "documents/file_0.xlsx".
   const rawPath = meta.result.file_path;
+
+  // Local Bot API server (--local) returns absolute filesystem paths like
+  // /var/lib/telegram-bot-api/<TOKEN>/documents/file_0.xlsx. When the bot is
+  // in the same container (Dockerfile combines both processes), read directly
+  // from disk — this is how the local Bot API server is designed to be used.
+  if (rawPath.startsWith('/var/lib/telegram-bot-api/')) {
+    try {
+      const buf = await readFile(rawPath);
+      logger.info({ fileId, bytes: buf.length, path: rawPath }, 'file read from local disk');
+      return buf;
+    } catch (err) {
+      logger.warn({ err, rawPath }, 'local disk read failed, falling back to HTTP');
+      // fall through to HTTP attempts below
+    }
+  }
+
+  // HTTP path — used for cloud API (api.telegram.org) or as fallback.
   const botId = token.split(':')[0]!;
   const dataDir = '/var/lib/telegram-bot-api';
   const candidates = Array.from(
     new Set([
-      // Strip data-dir + full token prefix → "documents/file_0.xlsx"   (CORRECT for --local)
       `${apiBase}/file/bot${token}/${stripPrefix(rawPath, [
         `${dataDir}/${token}/`,
         `${dataDir}/${botId}/`,
         `${dataDir}/`,
       ])}`,
-      // Strip only leading slashes
       `${apiBase}/file/bot${token}/${rawPath.replace(/^\/+/, '')}`,
-      // Keep leading slash → "//var/lib/..."
       `${apiBase}/file/bot${token}${rawPath.startsWith('/') ? rawPath : '/' + rawPath}`,
     ]),
   );
 
-  logger.info({ fileId, rawPath, apiBase, candidates }, 'attempting telegram file download');
+  logger.info({ fileId, rawPath, apiBase, candidates }, 'attempting telegram file download (HTTP)');
 
   let lastError: { url: string; status: number; body: string } | null = null;
   for (const url of candidates) {
@@ -77,7 +84,7 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
       const buf = Buffer.from(await dlRes.arrayBuffer());
       logger.info(
         { fileId, bytes: buf.length, urlUsed: url, rawPath },
-        'telegram file downloaded',
+        'telegram file downloaded via HTTP',
       );
       return buf;
     }

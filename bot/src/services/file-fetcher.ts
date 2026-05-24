@@ -44,17 +44,23 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
     throw new Error('Telegram вернул ответ без file_path. Попробуй заново /new.');
   }
 
-  // Path normalization for Local Bot API: --local mode returns an ABSOLUTE
-  // filesystem path like "/var/lib/telegram-bot-api/<bot_id>/documents/file.xlsx",
-  // but different aiogram image versions / configs expose different HTTP URL
-  // shapes. Cloud API returns a relative path. To survive both, try several
-  // candidate URLs and pick the first one that works.
+  // Path normalization for Local Bot API: --local mode returns an absolute
+  // filesystem path. The actual format observed in production is:
+  //   /var/lib/telegram-bot-api/<FULL_BOT_TOKEN>/documents/file_0.xlsx
+  // where <FULL_BOT_TOKEN> is "<id>:<hash>" (the entire bot token, not just
+  // the numeric id). The HTTP file endpoint expects the path relative to the
+  // bot's working directory, i.e. "documents/file_0.xlsx".
   const rawPath = meta.result.file_path;
   const botId = token.split(':')[0]!;
+  const dataDir = '/var/lib/telegram-bot-api';
   const candidates = Array.from(
     new Set([
-      // Strip data-dir + bot-id prefix → leaves "documents/file.xlsx"
-      `${apiBase}/file/bot${token}/${stripPrefix(rawPath, [`/var/lib/telegram-bot-api/${botId}/`, `/var/lib/telegram-bot-api/`])}`,
+      // Strip data-dir + full token prefix → "documents/file_0.xlsx"   (CORRECT for --local)
+      `${apiBase}/file/bot${token}/${stripPrefix(rawPath, [
+        `${dataDir}/${token}/`,
+        `${dataDir}/${botId}/`,
+        `${dataDir}/`,
+      ])}`,
       // Strip only leading slashes
       `${apiBase}/file/bot${token}/${rawPath.replace(/^\/+/, '')}`,
       // Keep leading slash → "//var/lib/..."

@@ -30,6 +30,9 @@ RUN chmod +x /usr/local/bin/telegram-bot-api
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 COPY --from=bot-build /app/dist ./dist
+# Static data — ЕАЭС TN VED catalogue (≈5MB CSV). Bundled into the image so the
+# bot can validate codes offline without depending on tnved.info/ifcg.ru.
+COPY data ./data
 
 # Data dir for telegram-bot-api files.
 RUN mkdir -p /var/lib/telegram-bot-api /tmp/telegram-bot-api

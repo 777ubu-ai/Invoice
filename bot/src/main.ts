@@ -1,8 +1,13 @@
 import { buildBot } from './bot.js';
 import { logger } from './utils/logger.js';
 import { env } from './config/env.js';
+import { preloadDatabase } from './services/tnved-lookup.js';
 
 async function main(): Promise<void> {
+  // Warm the local ЕАЭС TN VED catalogue (≈12 500 codes, ~5MB CSV) so the first
+  // invoice request doesn't pay for a cold read.
+  preloadDatabase();
+
   const bot = buildBot();
 
   const me = await bot.api.getMe();

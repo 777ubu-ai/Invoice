@@ -387,7 +387,13 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
     }
     ws.getCell(`B${r}`).value = row.name;
     ws.getCell(`B${r}`).alignment = { wrapText: true, vertical: 'top' };
-    ws.getCell(`C${r}`).value = Number(row.tnved_code);
+    // Display the code as plain text (preserves leading zeros) AND make the cell
+    // a hyperlink to tnved.info so the broker can verify the code in one click.
+    ws.getCell(`C${r}`).value = {
+      text: row.tnved_code,
+      hyperlink: `https://tnved.info/search/?q=${row.tnved_code}`,
+    };
+    ws.getCell(`C${r}`).font = { color: { argb: 'FF0563C1' }, underline: true };
     ws.getCell(`D${r}`).value = row.source_count;
     ws.getCell(`E${r}`).value = row.quantity;
     ws.getCell(`F${r}`).value = row.net_kg;

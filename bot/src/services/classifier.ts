@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { loadFeedbackStats, isLikelyBad } from './tnved-feedback.repo.js';
+import { validateCode, type TnvedEntry } from './tnved-lookup.js';
 
 // =============================================================================
 // Multi-agent classification pipeline.
@@ -36,6 +37,11 @@ export interface ClassifiedItem extends TranslatedItem {
   duty_rate: number;
   reasoning: string;
   alternatives: { code: string; description: string }[];
+  // Set by post-classifier validator against bot/data/tnved-eaeu.csv.
+  // 'invalid' means the 10-digit code does not exist in ЕАЭС-номенклатуре
+  // even after a retry — Маке will hard-fail on such items.
+  validation_status: 'valid' | 'invalid';
+  official_description?: string;
 }
 
 export interface ReviewedItem extends ClassifiedItem {
@@ -200,8 +206,19 @@ const CLASSIFIER_PROMPT = `Ты — таможенный брокер РК с э
 
 Только items в указанном порядке index. Не меняй порядок входных позиций.`;
 
-export async function agentClassifier(items: TranslatedItem[]): Promise<ClassifiedItem[]> {
-  const t0 = Date.now();
+interface ClassifierResponseItem {
+  index: number;
+  tnved_code: string;
+  tnved_description: string;
+  duty_rate: number;
+  reasoning: string;
+  alternatives: { code: string; description: string }[];
+}
+
+async function callClassifierLLM(
+  items: TranslatedItem[],
+  correctionsHint?: string,
+): Promise<Map<number, ClassifierResponseItem>> {
   const c = client();
 
   const inputJson = JSON.stringify(
@@ -215,59 +232,115 @@ export async function agentClassifier(items: TranslatedItem[]): Promise<Classifi
     })),
   );
 
+  const userMessage = correctionsHint
+    ? `${correctionsHint}\n\nПереклассифицируй ТОЛЬКО эти позиции, выбирая код строго из приведённого списка:\n\n${inputJson}`
+    : `Классифицируй эти позиции по ТН ВЭД ЕАЭС:\n\n${inputJson}`;
+
   const response = await c.messages.create({
     model: 'claude-opus-4-7',
     max_tokens: 16000,
     system: [
       { type: 'text', text: CLASSIFIER_PROMPT, cache_control: { type: 'ephemeral' } },
     ],
-    messages: [
-      {
-        role: 'user',
-        content: `Классифицируй эти позиции по ТН ВЭД ЕАЭС:\n\n${inputJson}`,
-      },
-    ],
+    messages: [{ role: 'user', content: userMessage }],
   });
 
   const textBlock = response.content.find((b) => b.type === 'text');
   if (!textBlock || textBlock.type !== 'text') {
     throw new Error('Агент 2 (Классификатор): пустой ответ');
   }
-  const parsed = extractJson<{
-    items: Array<{
-      index: number;
-      tnved_code: string;
-      tnved_description: string;
-      duty_rate: number;
-      reasoning: string;
-      alternatives: { code: string; description: string }[];
-    }>;
-  }>(textBlock.text);
+  const parsed = extractJson<{ items: ClassifierResponseItem[] }>(textBlock.text);
 
   logger.info(
     {
-      ms: Date.now() - t0,
-      items: parsed.items.length,
+      ms_call: response.usage ? undefined : undefined,
+      items: parsed.items?.length ?? 0,
       input_tokens: response.usage.input_tokens,
       output_tokens: response.usage.output_tokens,
+      retry: Boolean(correctionsHint),
     },
-    'agent 2 classifier done',
+    'classifier LLM call done',
   );
 
-  if (!Array.isArray(parsed.items) || parsed.items.length !== items.length) {
+  if (!Array.isArray(parsed.items)) {
+    throw new Error('Агент 2 (Классификатор): отсутствует поле items');
+  }
+  return new Map(parsed.items.map((p) => [p.index, p]));
+}
+
+function buildCorrectionsHint(
+  invalid: Array<{ item: TranslatedItem; badCode: string; siblings: TnvedEntry[] }>,
+): string {
+  const lines = invalid.map(({ item, badCode, siblings }) => {
+    const list = siblings.length
+      ? siblings.slice(0, 15).map((s) => `  • ${s.code} — ${s.description}`).join('\n')
+      : '  (в этой подгруппе нет 10-значных кодов — выбери из соседних 4-значных подгрупп)';
+    return `Позиция #${item.index} «${item.text_translated || item.text_original}»: код ${badCode} НЕ СУЩЕСТВУЕТ в ЕАЭС-номенклатуре. Реальные варианты в этой подгруппе:\n${list}`;
+  });
+  return `КРИТИЧНО: следующие коды, которые ты выбрал, не существуют в реальной ТН ВЭД ЕАЭС. Выбери код СТРОГО из приведённого списка для каждой позиции — никаких других вариантов.\n\n${lines.join('\n\n')}`;
+}
+
+export async function agentClassifier(items: TranslatedItem[]): Promise<ClassifiedItem[]> {
+  const t0 = Date.now();
+
+  // First pass — let the classifier choose codes freely.
+  let codeByIndex = await callClassifierLLM(items);
+  if (codeByIndex.size !== items.length) {
     throw new Error(
-      `Агент 2 (Классификатор): количество позиций не совпадает (вход ${items.length}, выход ${
-        parsed.items?.length ?? 0
-      })`,
+      `Агент 2 (Классификатор): количество позиций не совпадает (вход ${items.length}, выход ${codeByIndex.size})`,
     );
   }
 
-  const byIndex = new Map(parsed.items.map((p) => [p.index, p]));
+  // Validate every code against the local ЕАЭС database.
+  let invalidItems: Array<{ item: TranslatedItem; badCode: string; siblings: TnvedEntry[] }> = [];
+  for (const it of items) {
+    const c2 = codeByIndex.get(it.index)!;
+    const v = validateCode(c2.tnved_code);
+    if (!v.valid) {
+      // Prefer 6-digit siblings (same subheading), fall back to 4-digit heading siblings.
+      const siblings = (v.siblings_six && v.siblings_six.length ? v.siblings_six : v.siblings_four) ?? [];
+      invalidItems.push({ item: it, badCode: c2.tnved_code, siblings });
+    }
+  }
+
+  // Single retry pass for invalid codes — pass the real catalogue as a constraint.
+  if (invalidItems.length > 0) {
+    logger.warn(
+      { invalid: invalidItems.length, total: items.length, codes: invalidItems.map((x) => x.badCode) },
+      'classifier produced invalid codes — retrying with EAEU catalogue hints',
+    );
+    const hint = buildCorrectionsHint(invalidItems);
+    const retried = await callClassifierLLM(
+      invalidItems.map((x) => x.item),
+      hint,
+    );
+    for (const [idx, c2] of retried) {
+      codeByIndex.set(idx, c2);
+    }
+    // Re-validate after retry.
+    invalidItems = [];
+    for (const it of items) {
+      const c2 = codeByIndex.get(it.index)!;
+      const v = validateCode(c2.tnved_code);
+      if (!v.valid) {
+        const siblings = (v.siblings_six && v.siblings_six.length ? v.siblings_six : v.siblings_four) ?? [];
+        invalidItems.push({ item: it, badCode: c2.tnved_code, siblings });
+      }
+    }
+  }
+
+  logger.info(
+    { ms: Date.now() - t0, items: items.length, still_invalid: invalidItems.length },
+    'agent 2 classifier done',
+  );
+
+  // Build final ClassifiedItems with validation_status.
   return items.map((it) => {
-    const c2 = byIndex.get(it.index);
+    const c2 = codeByIndex.get(it.index);
     if (!c2) {
       throw new Error(`Агент 2 (Классификатор): пропущена позиция ${it.index}`);
     }
+    const v = validateCode(c2.tnved_code);
     return {
       ...it,
       tnved_code: c2.tnved_code,
@@ -275,6 +348,8 @@ export async function agentClassifier(items: TranslatedItem[]): Promise<Classifi
       duty_rate: c2.duty_rate,
       reasoning: c2.reasoning,
       alternatives: c2.alternatives ?? [],
+      validation_status: v.valid ? 'valid' : 'invalid',
+      official_description: v.official_description,
     };
   });
 }
@@ -328,6 +403,11 @@ export async function agentReviewer(items: ClassifiedItem[]): Promise<ReviewedIt
       gross_kg: it.gross_kg,
       tnved_code: it.tnved_code,
       tnved_description: it.tnved_description,
+      // Ground-truth description from the local ЕАЭС catalogue. If absent, the
+      // code does not exist — Маке will hard-fail downstream, but reviewer should
+      // still flag it for clarity.
+      tnved_official_description: it.official_description ?? null,
+      tnved_validation: it.validation_status,
       duty_rate: it.duty_rate,
       reasoning: it.reasoning,
     })),
@@ -342,7 +422,7 @@ export async function agentReviewer(items: ClassifiedItem[]): Promise<ReviewedIt
     messages: [
       {
         role: 'user',
-        content: `Проверь работу классификатора:\n\n${inputJson}`,
+        content: `Проверь работу классификатора. tnved_official_description — это РЕАЛЬНОЕ описание из ЕАЭС-номенклатуры; если оно по смыслу не совпадает с товаром, ставь confidence ниже 50 и needs_review=true.\n\n${inputJson}`,
       },
     ],
   });
@@ -606,10 +686,23 @@ export async function agentMake(report: LauraReport): Promise<MakeVerdict> {
   }
   const parsed = extractJson<{ approved: boolean; warnings?: string[]; make_notes?: string }>(textBlock.text);
 
-  // Hard safety: never approve if cost is missing.
+  // Hard safety: never approve if cost is missing or any code failed catalogue validation.
   const hardFailures: string[] = [];
   if (report.totals.cost_usd <= 0) hardFailures.push('Стоимость инвойса = 0 — категорически нельзя отправлять.');
   if (report.items.some((i) => i.cost_usd <= 0)) hardFailures.push('Есть позиции с нулевой стоимостью.');
+
+  // Hard-fail on codes that don't exist in the local ЕАЭС catalogue even after retry.
+  const invalidCodeItems = report.items.filter((i) => i.validation_status === 'invalid');
+  if (invalidCodeItems.length > 0) {
+    const list = invalidCodeItems
+      .slice(0, 5)
+      .map((i) => `#${i.index} «${i.text_translated || i.text_original}» — ${i.tnved_code}`)
+      .join('; ');
+    const tail = invalidCodeItems.length > 5 ? ` (и ещё ${invalidCodeItems.length - 5})` : '';
+    hardFailures.push(
+      `Коды не существуют в ЕАЭС-номенклатуре: ${list}${tail}. Классификатор ошибся, инвойс отправлять нельзя.`,
+    );
+  }
 
   // Soft warning: suspicious ТН ВЭД suffixes (last 4 digits).
   // Known-safe endings used in ЕАЭС: 0000, 9000, 9009, 0009, 0008, 0090, 0099, 9900, 9909, 9990, 9999, 0001, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000.

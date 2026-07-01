@@ -44,6 +44,10 @@ export interface TnvedEntry {
 let byCode: Map<string, string> | null = null;
 let bySixDigit: Map<string, TnvedEntry[]> | null = null;
 let byFourDigit: Map<string, TnvedEntry[]> | null = null;
+// Set to true after loadDb() throws — subsequent calls degrade to pass-through
+// (no validation) instead of crashing the bot. The pipeline behaves like it did
+// before the validator was added.
+let dbUnavailable = false;
 
 function parseCsvLine(line: string): [string, string] | null {
   // Format: <digits>,<description-or-quoted-description>
@@ -59,13 +63,25 @@ function loadDb(): {
   byCode: Map<string, string>;
   bySix: Map<string, TnvedEntry[]>;
   byFour: Map<string, TnvedEntry[]>;
-} {
+} | null {
+  if (dbUnavailable) return null;
   if (byCode && bySixDigit && byFourDigit) {
     return { byCode, bySix: bySixDigit, byFour: byFourDigit };
   }
   const t0 = Date.now();
-  const csvPath = resolveCsvPath();
-  const text = readFileSync(csvPath, 'utf8');
+  let csvPath: string;
+  let text: string;
+  try {
+    csvPath = resolveCsvPath();
+    text = readFileSync(csvPath, 'utf8');
+  } catch (err) {
+    dbUnavailable = true;
+    logger.error(
+      { err, candidates: CSV_CANDIDATES },
+      'tnved-lookup DB unavailable — validator will pass through codes without checking',
+    );
+    return null;
+  }
   const codes = new Map<string, string>();
   const sixGroups = new Map<string, TnvedEntry[]>();
   const fourGroups = new Map<string, TnvedEntry[]>();
@@ -114,24 +130,28 @@ export function validateCode(rawCode: string): ValidationResult {
   if (!/^\d{10}$/.test(code)) {
     return { valid: false, code };
   }
-  const { byCode: codes, bySix, byFour } = loadDb();
-  const desc = codes.get(code);
+  const db = loadDb();
+  // DB missing — degrade to pass-through so the bot keeps running.
+  if (!db) return { valid: true, code };
+  const desc = db.byCode.get(code);
   if (desc) {
     return { valid: true, code, official_description: desc };
   }
   return {
     valid: false,
     code,
-    siblings_six: bySix.get(code.slice(0, 6)) ?? [],
-    siblings_four: byFour.get(code.slice(0, 4)) ?? [],
+    siblings_six: db.bySix.get(code.slice(0, 6)) ?? [],
+    siblings_four: db.byFour.get(code.slice(0, 4)) ?? [],
   };
 }
 
 export function lookupDescription(code: string): string | null {
-  return loadDb().byCode.get(code) ?? null;
+  return loadDb()?.byCode.get(code) ?? null;
 }
 
-// Eagerly initialize on import so first invoice request doesn't pay the cost.
+// Eagerly initialize on import so the first invoice request doesn't pay the
+// cost. Never throws — a missing catalogue only prints an error and disables
+// validation for the process lifetime.
 export function preloadDatabase(): void {
   loadDb();
 }

@@ -41,6 +41,12 @@ interface ArmedState {
   // Rows parsed from files sent BEFORE the user picked a client. Held until
   // client is picked, then flushed and cleared.
   pending?: PendingBatch;
+  // Snapshot of the client list shown in the last picker. We index into this
+  // by number in the callback data because Telegram limits callback_data to
+  // 64 bytes — URL-encoded Cyrillic names ("ТОО Альфа" → 44+ bytes) blow the
+  // budget together with the "samples:client:" prefix and Telegram rejects
+  // the whole keyboard with BUTTON_DATA_INVALID.
+  clientOptions?: string[];
 }
 
 const armed = new Map<number, ArmedState>();
@@ -110,8 +116,12 @@ samples.command('samples', async (ctx) => {
 });
 
 // Show the client picker. Called both from the initial "📥 Загрузить" tap
-// AND after a file was sent before a client was picked.
+// AND after a file was sent before a client was picked. The client list is
+// stored in the armed state so the callback can reference clients by short
+// index instead of URL-encoded name (see ArmedState.clientOptions).
 async function askForClient(ctx: BotContext, prefix: string): Promise<void> {
+  const from = ctx.from?.id;
+  if (!from) return;
   let clients: string[] = [];
   try {
     clients = await api.listClients();
@@ -122,8 +132,11 @@ async function askForClient(ctx: BotContext, prefix: string): Promise<void> {
     await ctx.reply('⚠️ Список клиентов пуст. Добавь клиента через /clients.');
     return;
   }
+  touch(from, { clientOptions: clients });
   const kb = new InlineKeyboard();
-  for (const c of clients) kb.text(c, `samples:client:${encodeURIComponent(c)}`).row();
+  clients.forEach((c, i) => {
+    kb.text(c, `samples:client:${i}`).row();
+  });
   kb.text('❌ Отмена', 'samples:cancel');
   await ctx.reply(`${prefix}\n\n👥 <b>Выбери клиента:</b>`, {
     parse_mode: 'HTML',
@@ -144,19 +157,22 @@ samples.callbackQuery('samples:upload', async (ctx) => {
   );
 });
 
-// Step 2: client picked. If we already have pending rows from an early upload,
-// flush them; otherwise just wait for files.
-samples.callbackQuery(/^samples:client:(.+)$/, async (ctx) => {
+// Step 2: client picked. Callback carries an index into ArmedState.clientOptions
+// (short — fits Telegram's 64-byte callback_data limit). If we already have
+// pending rows from an early upload, flush them; otherwise just wait for files.
+samples.callbackQuery(/^samples:client:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const from = ctx.from?.id;
   if (!from) return;
-  const clientName = decodeURIComponent(ctx.match[1] ?? '');
+  const idx = Number(ctx.match[1] ?? -1);
+  const state = armed.get(from);
+  const clientName = state?.clientOptions?.[idx];
   if (!clientName) {
-    await ctx.reply('Не удалось разобрать имя клиента.');
+    // State may have expired since the picker was shown.
+    await ctx.reply('Сессия истекла. Открой 📚 Образцы → 📥 Загрузить заново.');
     return;
   }
 
-  const state = armed.get(from);
   const pending = state?.pending;
 
   if (pending && pending.rows.length > 0) {

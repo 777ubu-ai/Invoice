@@ -3,6 +3,7 @@ import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { loadFeedbackStats, isLikelyBad } from './tnved-feedback.repo.js';
 import { validateCode, type TnvedEntry } from './tnved-lookup.js';
+import { findSimilarPrecedents, type PrecedentMatch } from './tnved-precedents.repo.js';
 
 // =============================================================================
 // Multi-agent classification pipeline.
@@ -42,6 +43,16 @@ export interface ClassifiedItem extends TranslatedItem {
   // even after a retry — Маке will hard-fail on such items.
   validation_status: 'valid' | 'invalid';
   official_description?: string;
+  // Precedent match: how confident we are this exact (product → code) pair has
+  // been broker-approved before. Drives colour highlighting in the final xlsx.
+  //   high   — near-identical product previously classified with this code (≥0.85 similarity),
+  //             OR fuzzy match where the LLM also picked the precedent's code
+  //   medium — similar product family had this code
+  //   none   — brand-new product / no similar precedent
+  precedent_match: 'high' | 'medium' | 'none';
+  precedent_similarity?: number;
+  precedent_usage_count?: number;
+  precedent_matched_product?: string;
 }
 
 export interface ReviewedItem extends ClassifiedItem {
@@ -215,26 +226,56 @@ interface ClassifierResponseItem {
   alternatives: { code: string; description: string }[];
 }
 
+// Fetched-once map: item.index -> best precedent match for that product.
+type PrecedentMap = Map<number, PrecedentMatch>;
+
 async function callClassifierLLM(
   items: TranslatedItem[],
   correctionsHint?: string,
+  precedents?: PrecedentMap,
 ): Promise<Map<number, ClassifierResponseItem>> {
   const c = client();
 
   const inputJson = JSON.stringify(
-    items.map((it) => ({
-      index: it.index,
-      article: it.article,
-      text_original: it.text_original,
-      text_translated: it.text_translated,
-      quantity: it.quantity,
-      gross_kg: it.gross_kg,
-    })),
+    items.map((it) => {
+      const p = precedents?.get(it.index);
+      return {
+        index: it.index,
+        article: it.article,
+        text_original: it.text_original,
+        text_translated: it.text_translated,
+        quantity: it.quantity,
+        gross_kg: it.gross_kg,
+        // When a broker-approved precedent exists for this exact / similar
+        // product, feed it to the LLM as a strong hint. `similarity` and
+        // `usage_count` let the model weigh how much to trust it.
+        precedent_hint: p
+          ? {
+              suggested_code: p.code,
+              official_description: p.description,
+              matched_product: p.matched_product_name,
+              similarity: Number(p.similarity.toFixed(2)),
+              times_used_by_broker: p.usage_count,
+            }
+          : undefined,
+      };
+    }),
   );
+
+  const precedentsPreamble =
+    precedents && precedents.size > 0
+      ? `ВАЖНО — В ДАННЫХ ЕСТЬ ПОЛЕ precedent_hint для некоторых позиций. Это коды, которые БРОКЕР уже одобрял в прошлом для того же или похожего товара:
+- Если similarity ≥ 0.85 (почти точное совпадение) — используй suggested_code БЕЗ ИЗМЕНЕНИЙ, это уже проверено брокером.
+- Если 0.60-0.85 (похожий товар) — сильно склоняйся к suggested_code; если он в правильной группе для нового товара, ставь его.
+- Если <0.60 — используй как подсказку но принимай решение сам.
+Прецеденты приоритетнее твоих справочных знаний.
+
+`
+      : '';
 
   const userMessage = correctionsHint
     ? `${correctionsHint}\n\nПереклассифицируй ТОЛЬКО эти позиции, выбирая код строго из приведённого списка:\n\n${inputJson}`
-    : `Классифицируй эти позиции по ТН ВЭД ЕАЭС:\n\n${inputJson}`;
+    : `${precedentsPreamble}Классифицируй эти позиции по ТН ВЭД ЕАЭС:\n\n${inputJson}`;
 
   const response = await c.messages.create({
     model: 'claude-opus-4-7',
@@ -280,11 +321,37 @@ function buildCorrectionsHint(
   return `КРИТИЧНО: следующие коды, которые ты выбрал, не существуют в реальной ТН ВЭД ЕАЭС. Выбери код СТРОГО из приведённого списка для каждой позиции — никаких других вариантов.\n\n${lines.join('\n\n')}`;
 }
 
-export async function agentClassifier(items: TranslatedItem[]): Promise<ClassifiedItem[]> {
+export async function agentClassifier(
+  items: TranslatedItem[],
+  opts: { clientName?: string } = {},
+): Promise<ClassifiedItem[]> {
   const t0 = Date.now();
 
-  // First pass — let the classifier choose codes freely.
-  let codeByIndex = await callClassifierLLM(items);
+  // Precedent lookup — one query per item, scoped to the client. If the
+  // Supabase table is empty or the client is new, this is cheap and returns
+  // nothing; no need to skip when the feature is "not seeded yet".
+  const precedents: PrecedentMap = new Map();
+  if (opts.clientName) {
+    for (const it of items) {
+      try {
+        const matches = await findSimilarPrecedents(
+          opts.clientName,
+          it.text_translated || it.text_original,
+          { limit: 1, minSimilarity: 0.45 },
+        );
+        if (matches.length > 0 && matches[0]) precedents.set(it.index, matches[0]);
+      } catch (err) {
+        logger.warn({ err, index: it.index }, 'precedent lookup failed — continuing without hint');
+      }
+    }
+    logger.info(
+      { items: items.length, precedent_hits: precedents.size, client: opts.clientName },
+      'precedent lookup done',
+    );
+  }
+
+  // First pass — classifier sees the precedent hints inline.
+  let codeByIndex = await callClassifierLLM(items, undefined, precedents);
   if (codeByIndex.size !== items.length) {
     throw new Error(
       `Агент 2 (Классификатор): количество позиций не совпадает (вход ${items.length}, выход ${codeByIndex.size})`,
@@ -334,13 +401,30 @@ export async function agentClassifier(items: TranslatedItem[]): Promise<Classifi
     'agent 2 classifier done',
   );
 
-  // Build final ClassifiedItems with validation_status.
+  // Build final ClassifiedItems with validation_status + precedent_match.
   return items.map((it) => {
     const c2 = codeByIndex.get(it.index);
     if (!c2) {
       throw new Error(`Агент 2 (Классификатор): пропущена позиция ${it.index}`);
     }
     const v = validateCode(c2.tnved_code);
+    const p = precedents.get(it.index);
+    // Match tier:
+    //   'high'   — precedent existed AND the LLM's final code equals the
+    //              precedent's code (regardless of similarity, because if the
+    //              classifier agrees with a prior broker decision, that's
+    //              exactly the "проходит в практике" signal we want to surface)
+    //              OR similarity ≥ 0.85 (near-identical product)
+    //   'medium' — precedent existed and similarity 0.45-0.85, or codes differ
+    //              but classifier had a hint
+    //   'none'   — no precedent found
+    let precedent_match: 'high' | 'medium' | 'none' = 'none';
+    if (p) {
+      const agrees = p.code === c2.tnved_code;
+      if (agrees && p.similarity >= 0.85) precedent_match = 'high';
+      else if (agrees || p.similarity >= 0.60) precedent_match = 'medium';
+      else precedent_match = 'none';
+    }
     return {
       ...it,
       tnved_code: c2.tnved_code,
@@ -350,6 +434,10 @@ export async function agentClassifier(items: TranslatedItem[]): Promise<Classifi
       alternatives: c2.alternatives ?? [],
       validation_status: v.valid ? 'valid' : 'invalid',
       official_description: v.official_description,
+      precedent_match,
+      precedent_similarity: p?.similarity,
+      precedent_usage_count: p?.usage_count,
+      precedent_matched_product: p?.matched_product_name,
     };
   });
 }
@@ -704,27 +792,11 @@ export async function agentMake(report: LauraReport): Promise<MakeVerdict> {
     );
   }
 
-  // Soft warning: suspicious ТН ВЭД suffixes (last 4 digits).
-  // Known-safe endings used in ЕАЭС: 0000, 9000, 9009, 0009, 0008, 0090, 0099, 9900, 9909, 9990, 9999, 0001, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000.
-  // Anything else (like 3009, 1009, 0050, 1090) is usually a hallucinated code.
-  const SAFE_SUFFIXES = new Set([
-    '0000', '0001', '0008', '0009', '0090', '0099',
-    '1000', '2000', '3000', '4000', '5000', '6000', '7000', '8000',
-    '9000', '9009', '9090', '9099', '9100', '9900', '9909', '9990', '9999',
-  ]);
-  const suspiciousCodes: string[] = [];
-  for (const it of report.items) {
-    if (!/^\d{10}$/.test(it.tnved_code)) continue;
-    const suffix = it.tnved_code.slice(6);
-    if (!SAFE_SUFFIXES.has(suffix)) {
-      suspiciousCodes.push(`#${it.index} «${it.text_translated || it.text_original}» — ${it.tnved_code} (суффикс ${suffix} нестандартный, проверь по справочнику)`);
-    }
-  }
-  if (suspiciousCodes.length > 0) {
-    const head = `Подозрительные 10-значные суффиксы (${suspiciousCodes.length} шт) — нужна проверка брокером:`;
-    parsed.warnings = [head, ...suspiciousCodes.slice(0, 10), ...(parsed.warnings ?? [])];
-    if (suspiciousCodes.length > 10) parsed.warnings.push(`…и ещё ${suspiciousCodes.length - 10} позиций`);
-  }
+  // Legacy suffix heuristic — replaced by the real ЕАЭС catalogue validator
+  // in agentClassifier. Kept intentionally as a NO-OP: if validation_status
+  // is 'valid', the code exists in the catalogue and its suffix is by
+  // definition legitimate (e.g. 8418102001 for combined fridge-freezers used
+  // to be flagged as suspicious even though it's a real ЕАЭС code).
 
   // Lookup against accumulated operator/broker feedback in Supabase.
   // Codes marked 'bad' by humans in past invoices → strong warning.
@@ -791,6 +863,7 @@ export async function runClassificationPipeline(
     mode: LauraPriceMode;
     value?: number;
     defaultPricePerKg?: number;
+    clientName?: string;
   },
   onProgress?: (p: PipelineProgress) => void | Promise<void>,
 ): Promise<PipelineResult> {
@@ -798,7 +871,7 @@ export async function runClassificationPipeline(
   const translated = await agentTranslator(fileText);
 
   onProgress?.({ stage: 2, label: `Агент 2: подбор кодов ТН ВЭД (${translated.length} поз.)...` });
-  const classified = await agentClassifier(translated);
+  const classified = await agentClassifier(translated, { clientName: options.clientName });
 
   onProgress?.({ stage: 3, label: 'Агент 3: проверка работы классификатора...' });
   const reviewed = await agentReviewer(classified);

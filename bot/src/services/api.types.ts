@@ -29,6 +29,11 @@ export interface InvoiceItem {
   cost_usd?: number;
   duty_usd?: number;
   vat_usd?: number;
+  // Precedent metadata — источник цветовой подсветки в xlsx.
+  precedent_match?: 'high' | 'medium' | 'none';
+  precedent_similarity?: number;
+  precedent_usage_count?: number;
+  precedent_matched_product?: string;
 }
 
 export interface InvoiceSummary {

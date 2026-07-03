@@ -8,6 +8,8 @@ export function mainMenu(role: Role): InlineKeyboard {
     .row()
     .text('📜 История', 'menu:history')
     .text('👥 Мои клиенты', 'menu:clients')
+    .row()
+    .text('📚 Образцы кодов', 'menu:samples')
     .row();
 
   if (role === 'OPERATOR') {

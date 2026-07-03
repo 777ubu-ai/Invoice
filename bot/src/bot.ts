@@ -31,6 +31,7 @@ import { addManagerConversation } from './conversations/add-manager.conv.js';
 import { helpRequestConversation } from './conversations/help-request.conv.js';
 
 import { callbacks } from './handlers/callbacks.js';
+import { samples } from './handlers/samples.handler.js';
 import { setBotApi } from './services/notifications.js';
 import { logger } from './utils/logger.js';
 
@@ -104,6 +105,11 @@ export function buildBot(): Bot<BotContext> {
     await ctx.conversation.enter('addManager');
   });
   bot.command('broadcast', requireRole('OWNER'), broadcastHandler);
+
+  // Samples composer intercepts document uploads while the user is inside the
+  // "загрузить образцы" flow. It MUST come before the fallback below and
+  // before the callbacks composer that owns the main-menu tap.
+  bot.use(samples);
 
   bot.use(callbacks);
 

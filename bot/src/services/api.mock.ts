@@ -86,7 +86,12 @@ async function classifyFromUploadedFile(
   const fileText = rowsAsText(parsedXlsx);
   const result = await runClassificationPipeline(
     fileText,
-    { mode, value, defaultPricePerKg: defaultPricePerKgFor(clientName) },
+    {
+      mode,
+      value,
+      defaultPricePerKg: defaultPricePerKgFor(clientName),
+      clientName,
+    },
     (p) => {
       logger.info({ stage: p.stage, label: p.label }, 'pipeline progress');
     },
@@ -115,6 +120,10 @@ async function classifyFromUploadedFile(
     cost_usd: it.cost_usd,
     duty_usd: it.duty_usd,
     vat_usd: it.vat_usd,
+    precedent_match: it.precedent_match,
+    precedent_similarity: it.precedent_similarity,
+    precedent_usage_count: it.precedent_usage_count,
+    precedent_matched_product: it.precedent_matched_product,
   }));
 
   const summary: InvoiceSummary = {
@@ -253,17 +262,29 @@ interface MergedRow {
   net_kg: number;
   gross_kg: number;
   cost_usd: number;
+  // Best precedent tier seen among the underlying items with this code.
+  // If ANY item was recognised as a repeat product (`high`), we mark the whole
+  // row green — even if other names in the same code differ. Brokers reading
+  // the invoice want to see "this code has been approved before" as a single
+  // signal per row, not per underlying line.
+  precedent_match: 'high' | 'medium' | 'none';
+  precedent_usage_count?: number;
 }
 
 function groupItemsByCode(items: InvoiceItem[]): MergedRow[] {
   const map = new Map<string, MergedRow>();
   const namesByCode = new Map<string, Set<string>>();
+  // Rank precedent tiers to compute max across the group.
+  const rank: Record<'none' | 'medium' | 'high', number> = { none: 0, medium: 1, high: 2 };
+  const bestTier = (a: 'high' | 'medium' | 'none', b: 'high' | 'medium' | 'none') =>
+    rank[a] >= rank[b] ? a : b;
   for (const it of items) {
     const code = it.tnved_code;
     const cleanName = (it.text_translated || it.text_original || '').trim();
     const namesSet = namesByCode.get(code) ?? new Set<string>();
     if (cleanName) namesSet.add(cleanName.toUpperCase());
     namesByCode.set(code, namesSet);
+    const tier: 'high' | 'medium' | 'none' = it.precedent_match ?? 'none';
 
     const existing = map.get(code);
     if (existing) {
@@ -272,6 +293,10 @@ function groupItemsByCode(items: InvoiceItem[]): MergedRow[] {
       existing.gross_kg += it.gross_kg || 0;
       existing.cost_usd += it.cost_usd || 0;
       existing.source_count += 1;
+      existing.precedent_match = bestTier(existing.precedent_match, tier);
+      if (it.precedent_usage_count && (!existing.precedent_usage_count || it.precedent_usage_count > existing.precedent_usage_count)) {
+        existing.precedent_usage_count = it.precedent_usage_count;
+      }
     } else {
       map.set(code, {
         tnved_code: code,
@@ -282,6 +307,8 @@ function groupItemsByCode(items: InvoiceItem[]): MergedRow[] {
         net_kg: it.net_kg || 0,
         gross_kg: it.gross_kg || 0,
         cost_usd: it.cost_usd || 0,
+        precedent_match: tier,
+        precedent_usage_count: it.precedent_usage_count,
       });
     }
   }
@@ -394,6 +421,24 @@ async function buildXlsx(invoice: InvoiceState): Promise<string> {
       hyperlink: `https://tnved.info/search/?q=${row.tnved_code}`,
     };
     ws.getCell(`C${r}`).font = { color: { argb: 'FF0563C1' }, underline: true };
+    // Precedent-tier fill on the code cell.
+    //   Green (C6EFCE)  — repeat product previously approved by broker
+    //   Yellow (FFEB9C) — similar product / same code family precedent
+    //   No fill         — brand-new product
+    // Broker sees at a glance which rows are already trusted and which need
+    // scrutiny. Bold weight adds emphasis on green rows.
+    if (row.precedent_match === 'high') {
+      ws.getCell(`C${r}`).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC6EFCE' } };
+      ws.getCell(`C${r}`).font = { color: { argb: 'FF006100' }, underline: true, bold: true };
+      const note = row.precedent_usage_count
+        ? `Код уже применялся ${row.precedent_usage_count} раз — одобрено брокером`
+        : 'Код уже применялся ранее — одобрено брокером';
+      ws.getCell(`C${r}`).note = note;
+    } else if (row.precedent_match === 'medium') {
+      ws.getCell(`C${r}`).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFEB9C' } };
+      ws.getCell(`C${r}`).font = { color: { argb: 'FF9C5700' }, underline: true };
+      ws.getCell(`C${r}`).note = 'Похожий товар этого клиента ранее шёл под этот код — проверь';
+    }
     ws.getCell(`D${r}`).value = row.source_count;
     ws.getCell(`E${r}`).value = row.quantity;
     ws.getCell(`F${r}`).value = row.net_kg;

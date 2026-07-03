@@ -8,8 +8,6 @@ import { listOperatorsByManager, deactivateUser } from '../services/users.repo.j
 import { notifyUser } from '../services/notifications.js';
 import { reviewKeyboard, itemKeyboard } from '../keyboards/review.kb.js';
 import { recordFeedback } from '../services/tnved-feedback.repo.js';
-import { upsertPrecedentsBatch } from '../services/tnved-precedents.repo.js';
-import { logger } from '../utils/logger.js';
 import { reassignKeyboard } from '../keyboards/team.kb.js';
 import { invoiceSummaryText } from '../utils/format.js';
 
@@ -204,32 +202,11 @@ callbacks.callbackQuery(/^inv:approve:(.+)$/, async (ctx) => {
     target_type: 'invoice',
     target_id: invoiceId,
   });
-  // Auto-save every approved item into the precedent whitelist. Each subsequent
-  // invoice for this client will get this code as a hint on similar products.
-  // Failures here must never block delivery of the approved invoice.
-  try {
-    const rows = (inv.items ?? [])
-      .filter((it) => it.tnved_code && (it.text_translated || it.text_original))
-      .map((it) => ({
-        client_name: inv.client_name,
-        product_name: (it.text_translated || it.text_original) as string,
-        tnved_code: it.tnved_code,
-        tnved_description: it.tnved_description ?? null,
-        duty_rate: it.duty_rate ?? null,
-        invoice_id: invoiceId,
-        approved_by: ctx.dbUser?.id ?? null,
-        source: 'auto' as const,
-      }));
-    if (rows.length > 0) {
-      const stats = await upsertPrecedentsBatch(rows);
-      logger.info(
-        { invoiceId, client: inv.client_name, ...stats },
-        'precedents saved on invoice approval',
-      );
-    }
-  } catch (err) {
-    logger.warn({ err, invoiceId }, 'precedent auto-save failed — approval unaffected');
-  }
+  // NOTE: precedents are NOT auto-saved on approval by design — brokers
+  // occasionally approve invoices with a wrong code (fatigue, missed a row).
+  // We can't let those slip into the whitelist and turn into "rules". The
+  // precedent library is populated exclusively via the manual "📚 Образцы"
+  // upload flow, where the broker curates a folder of hand-verified invoices.
   if (ctx.dbUser) {
     await supabase
       .from('telegram_users')

@@ -6,42 +6,46 @@ import {
 } from '../services/tnved-precedents.repo.js';
 import { fetchTelegramFile } from '../services/file-fetcher.js';
 import { parseXlsxBuffer, type ParsedPackingList } from '../services/xlsx-parser.js';
+import { api } from '../services/api.js';
 import { logger } from '../utils/logger.js';
 
 // =============================================================================
 // «📚 Образцы кодов» — the precedent library UI.
 //
-//   /samples or menu:samples → main screen with stats and actions
-//   samples:upload           → arm session to accept the next xlsx as bulk import
-//   samples:cancel           → drop the armed state
+// Precedents (broker-verified product → code pairs) come ONLY through this
+// manual upload flow — never auto-saved on invoice approval. Brokers curate
+// a folder of hand-checked invoices and drop them here whenever they add new
+// verified samples. The classifier reads from this base on every new invoice.
 //
-// Bulk import strategy: user sends an already-approved invoice xlsx (like a
-// previous 2026-C351-XXXX.xlsx). The parser finds the code column and product
-// name column and inserts a precedent for each row. Wrong-format uploads are
-// rejected with a clear message.
+// Flow:
+//   1. User taps 📚 Образцы   → stats + "загрузить" button
+//   2. User taps 📥 Загрузить  → pick client (LINEA TRANSIT / …)
+//   3. User taps client        → session armed for that client
+//   4. User sends xlsx         → parse + bulk insert precedents for that client
 // =============================================================================
 
 export const samples = new Composer<BotContext>();
 
-// Per-user in-memory arm state. Simple Map is fine: we're a small-team bot and
-// the state doesn't need to survive a restart — user can just tap the button
-// again. Keyed by telegram user id.
-const armed = new Map<number, { armedAt: number; clientName?: string }>();
-const ARM_TTL_MS = 5 * 60 * 1000;
+// Per-user in-memory arm state. Simple Map is fine: small-team bot, doesn't
+// need to survive a restart — user can just start the flow again.
+interface ArmedState {
+  armedAt: number;
+  clientName: string;
+}
+const armed = new Map<number, ArmedState>();
+const ARM_TTL_MS = 10 * 60 * 1000;
 
-function isArmed(userId: number): boolean {
+function getArmed(userId: number): ArmedState | null {
   const s = armed.get(userId);
-  if (!s) return false;
+  if (!s) return null;
   if (Date.now() - s.armedAt > ARM_TTL_MS) {
     armed.delete(userId);
-    return false;
+    return null;
   }
-  return true;
+  return s;
 }
 
 async function showSamplesMenu(ctx: BotContext): Promise<void> {
-  // For now the OWNER sees an aggregated global view. Per-client filter can
-  // come later; the DB schema already supports it.
   const stats = await getPrecedentStats(null).catch((err) => {
     logger.warn({ err }, 'getPrecedentStats failed');
     return { total: 0, distinct_codes: 0, top_codes: [] };
@@ -64,13 +68,15 @@ async function showSamplesMenu(ctx: BotContext): Promise<void> {
     '<b>Топ-5 наиболее применяемых:</b>\n' +
     topLines +
     '\n\n' +
-    'Каждый одобренный инвойс автоматически добавляется в эту базу — на следующем инвойсе повторяющиеся товары уже будут распознаваться как «проверенные».\n\n' +
-    'Можно также загрузить старый инвойс вручную — все его позиции сразу пойдут в базу образцов.';
+    'Как работает база:\n' +
+    '• Ты загружаешь СЮДА готовые, лично проверенные инвойсы (xlsx).\n' +
+    '• Бот берёт все пары (товар → код) как эталон.\n' +
+    '• На следующих инвойсах: если товар совпадает или похож — код ставится из эталона и <b>подсвечивается зелёным</b>.\n\n' +
+    '⚠️ Одобрённые ботом инвойсы <b>НЕ попадают</b> в базу автоматически — только то, что ты залил вручную.';
 
   const kb = new InlineKeyboard()
-    .text('📥 Загрузить готовый инвойс', 'samples:upload')
-    .row()
-    .text('◀️ Назад', 'menu:back');
+    .text('📥 Загрузить образец', 'samples:upload')
+    .row();
 
   await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
 }
@@ -84,16 +90,48 @@ samples.command('samples', async (ctx) => {
   await showSamplesMenu(ctx);
 });
 
+// Step 1 of upload: ask which client the samples are for.
 samples.callbackQuery('samples:upload', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  let clients: string[] = [];
+  try {
+    clients = await api.listClients();
+  } catch (err) {
+    logger.warn({ err }, 'listClients failed in samples flow');
+  }
+  if (clients.length === 0) {
+    await ctx.reply('⚠️ Список клиентов пуст. Добавь клиента через /clients.');
+    return;
+  }
+  const kb = new InlineKeyboard();
+  for (const c of clients) {
+    kb.text(c, `samples:client:${encodeURIComponent(c)}`).row();
+  }
+  kb.text('❌ Отмена', 'samples:cancel');
+  await ctx.reply(
+    '👥 <b>Для какого клиента загружаешь образец?</b>\n\n' +
+      'Выбранный клиент определит область применения: точно такие же товары этого клиента на следующих инвойсах будут распознаны как «проверенные».',
+    { parse_mode: 'HTML', reply_markup: kb },
+  );
+});
+
+// Step 2 of upload: arm the session for the chosen client and wait for xlsx.
+samples.callbackQuery(/^samples:client:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const from = ctx.from?.id;
   if (!from) return;
-  armed.set(from, { armedAt: Date.now() });
+  const clientName = decodeURIComponent(ctx.match[1] ?? '');
+  if (!clientName) {
+    await ctx.reply('Не удалось разобрать имя клиента.');
+    return;
+  }
+  armed.set(from, { armedAt: Date.now(), clientName });
   await ctx.reply(
-    '📥 Загрузка образцов\n\n' +
-      'Отправь мне xlsx-файл готового ранее одобренного инвойса — например `invoice_2026-C351-0129.xlsx`. ' +
-      'Я разберу его и добавлю все позиции в базу образцов.\n\n' +
-      'Отменить: /cancel',
+    `📥 <b>Клиент: ${clientName}</b>\n\n` +
+      'Теперь отправь мне xlsx-файл проверенного инвойса. Я разберу все позиции и добавлю их в базу образцов этого клиента.\n\n' +
+      'Можно отправить несколько файлов подряд — все пойдут этому же клиенту.\n\n' +
+      'Отмена: /cancel',
+    { parse_mode: 'HTML' },
   );
 });
 
@@ -108,12 +146,13 @@ samples.command('cancel', async (ctx) => {
   await ctx.reply('Отменено.');
 });
 
-// Intercept document uploads only when the user has armed the samples flow.
-// If not armed, we do nothing — the regular /new invoice flow keeps handling
-// document messages.
+// Intercept document uploads only while the samples flow is armed for a
+// specific client. If not armed, do nothing — the regular /new invoice flow
+// keeps handling document messages.
 samples.on('message:document', async (ctx, next) => {
   const from = ctx.from?.id;
-  if (!from || !isArmed(from)) return next();
+  const state = from ? getArmed(from) : null;
+  if (!from || !state) return next();
 
   const doc = ctx.message.document;
   const name = doc.file_name ?? '';
@@ -123,27 +162,19 @@ samples.on('message:document', async (ctx, next) => {
     return;
   }
 
-  await ctx.reply('🔍 Разбираю файл...');
+  await ctx.reply(`🔍 Разбираю «${name}» для клиента ${state.clientName}...`);
   try {
     const buf = await fetchTelegramFile(doc.file_id);
     const parsed = await parseXlsxBuffer(buf, name);
-    // Heuristic: find header row that has a "код" column and a "наименование"
-    // column. Bot's own invoice format uses columns B (name) and C (code).
     const rows = extractCodeNamePairs(parsed);
     if (rows.length === 0) {
       await ctx.reply(
-        '⚠️ В файле не нашлось строк с 10-значными кодами и наименованиями. Убедись что колонка "КОД ТН ВЭД" содержит десятизначные числа.',
+        '⚠️ В файле не нашлось строк с 10-значными кодами и наименованиями. Убедись что колонка «КОД ТН ВЭД» содержит десятизначные числа.',
       );
-      armed.delete(from);
       return;
     }
-    // The uploaded file might mix several clients — we can't know reliably.
-    // Store all under a shared "MANUAL_UPLOAD" bucket so they can still be
-    // pruned later; the real client-scoped save path is the auto-save on
-    // Approve. If the user hints at a client name via a caption, use it.
-    const clientName = (ctx.message.caption ?? '').trim() || 'MANUAL_UPLOAD';
     const batch = rows.map((r) => ({
-      client_name: clientName,
+      client_name: state.clientName,
       product_name: r.name,
       tnved_code: r.code,
       tnved_description: r.description ?? null,
@@ -151,15 +182,15 @@ samples.on('message:document', async (ctx, next) => {
       source: 'manual' as const,
     }));
     const stats = await upsertPrecedentsBatch(batch);
-    armed.delete(from);
+    // Reset the timer so the user can send more files without re-tapping.
+    armed.set(from, { armedAt: Date.now(), clientName: state.clientName });
     await ctx.reply(
-      `✅ Загружено ${stats.saved} образцов${stats.failed ? `, ошибок: ${stats.failed}` : ''}.\n` +
-        `Клиент: <b>${clientName}</b>${clientName === 'MANUAL_UPLOAD' ? ' (укажи имя клиента в подписи к файлу в следующий раз)' : ''}`,
+      `✅ <b>${state.clientName}</b>: добавлено ${stats.saved} образцов${stats.failed ? `, ошибок ${stats.failed}` : ''}.\n\n` +
+        'Можешь прислать следующий файл или нажать /cancel чтобы выйти.',
       { parse_mode: 'HTML' },
     );
   } catch (err) {
     logger.warn({ err, file: name }, 'samples upload failed');
-    armed.delete(from);
     await ctx.reply(`❌ Ошибка загрузки: ${(err as Error).message}`);
   }
 });
@@ -170,16 +201,13 @@ interface CodeNamePair {
   description?: string;
 }
 
-// Extract (code, name, description) tuples from an xlsx that follows our own
-// invoice template: header row somewhere in R1..R20, then item rows below.
-// Skip totals and blanks. Recognises either aggregated (B=name, C=code) layout
-// or generic tables with any column named "код"/"code".
+// Extract (code, name, description) tuples from an xlsx. Recognises the bot's
+// own invoice layout (B=name, C=code) via a header-row scan for «Код ТН ВЭД»
+// and «Наименование» columns; falls back to fixed columns if no header found.
 function extractCodeNamePairs(parsed: ParsedPackingList): CodeNamePair[] {
-  // Flatten RawRow[] to plain string[][] for column-based scanning.
   const grid: string[][] = (parsed.rows ?? []).map((r) => r.cells ?? []);
   if (grid.length === 0) return [];
 
-  // Find header row: contains "код" and any name-ish column ("наименование" / "товар" / "product").
   let headerIdx = -1;
   let codeCol = -1;
   let nameCol = -1;
@@ -196,7 +224,6 @@ function extractCodeNamePairs(parsed: ParsedPackingList): CodeNamePair[] {
       break;
     }
   }
-  // Fallback: assume the bot's own layout (row 15, B=name, C=code).
   if (headerIdx < 0) {
     headerIdx = 14;
     nameCol = 1;
@@ -219,10 +246,3 @@ function extractCodeNamePairs(parsed: ParsedPackingList): CodeNamePair[] {
   }
   return out;
 }
-
-// Fallback: user tapped "Назад" from the samples screen. Show the main menu.
-samples.callbackQuery('menu:back', async (ctx) => {
-  await ctx.answerCallbackQuery();
-  // Delegate to the existing /start-style menu display.
-  await ctx.reply('Главное меню — используй /start');
-});

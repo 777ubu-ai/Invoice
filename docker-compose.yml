@@ -1,0 +1,90 @@
+# TNVED.ai bot self-hosted stack.
+#
+# Three services:
+#   postgres — replaces Supabase Postgres. Data lives in a named volume so
+#              `docker compose down` preserves everything; only `docker compose
+#              down -v` wipes it.
+#   postgrest — REST layer that speaks the same protocol supabase-js expects.
+#              This lets us keep the bot's code unchanged: SUPABASE_URL just
+#              points here instead of the cloud Supabase.
+#   bot      — Node 22 process running long-polling against Telegram.
+#              Restarts on failure and on VPS reboot.
+#
+# First-time setup (see MIGRATION.md for the full walkthrough):
+#   1. cp .env.example .env  and fill it in
+#   2. docker compose up -d
+#   3. docker compose logs -f bot
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tnved}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      POSTGRES_DB: ${POSTGRES_DB:-tnved}
+      TZ: Asia/Almaty
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Migrations applied automatically on FIRST start of an empty volume.
+      # For subsequent migrations, run them manually via `docker compose exec`.
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tnved} -d ${POSTGRES_DB:-tnved}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Expose only to localhost by default. To connect from your Mac:
+    #   ssh -L 5432:localhost:5432 user@vps  → psql at localhost:5432 on Mac.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  postgrest:
+    image: postgrest/postgrest:v12.2.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # PostgREST connects with a superuser-lite role so it can see all schemas
+      # the bot uses. In self-hosted mode we skip JWT auth entirely — the whole
+      # stack sits behind localhost + firewall, only the bot container talks to
+      # it via the compose network.
+      PGRST_DB_URI: postgres://${POSTGRES_USER:-tnved}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tnved}
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: ${POSTGRES_USER:-tnved}
+      # Long-lived JWT secret. supabase-js signs bearer tokens with this;
+      # PostgREST verifies them. Any 32+ char random string works.
+      PGRST_JWT_SECRET: ${SUPABASE_JWT_SECRET:?SUPABASE_JWT_SECRET required (32+ char random)}
+    # Only reachable inside the compose network — no host port.
+
+  bot:
+    build:
+      context: ./bot
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgrest:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN required}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?TELEGRAM_API_ID required (from my.telegram.org)}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?TELEGRAM_API_HASH required (from my.telegram.org)}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY required}
+      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID}
+      # supabase-js talks to our local PostgREST. From the bot's point of view
+      # this looks identical to the cloud Supabase — no code changes required.
+      SUPABASE_URL: http://postgrest:3000
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?service role JWT required (see MIGRATION.md)}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:

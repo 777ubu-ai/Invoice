@@ -19,5 +19,9 @@ spec.
 
 ## Infrastructure
 
-- **Supabase** project `tnved-bot` (region eu-central-1) — schema in `migrations/`.
-- **Telegram bot** `@InvoiceAgentsBot`.
+Currently deployed on **Railway** + **Supabase** (`tnved-bot` project, region
+eu-central-1) — schema in `migrations/`. Telegram bot: `@InvoiceAgentsBot`.
+
+Self-hosting on your own VPS (Postgres + PostgREST + bot in Docker Compose,
+no code changes required) is set up and documented in **`MIGRATION.md`** at
+the repo root.

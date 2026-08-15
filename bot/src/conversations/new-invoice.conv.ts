@@ -55,12 +55,12 @@ export async function newInvoiceConversation(
   let fileName = 'packing-list';
   let fileUrl: string | undefined;
   let fileSize = 0;
-  // Лимит зависит от того где живёт Bot API:
-  //   - api.telegram.org → 20 МБ
-  //   - локальный telegram-bot-api сервер (TELEGRAM_API_ROOT задан) → 2 ГБ
-  const downloadLimit = env.TELEGRAM_API_ROOT
+  // Transport can handle larger files with a local Bot API, but production
+  // policy keeps uploads bounded so a few XLSX/ZIP files cannot fill the VPS.
+  const transportLimit = env.TELEGRAM_API_ROOT
     ? 2 * 1024 * 1024 * 1024
     : 20 * 1024 * 1024;
+  const downloadLimit = Math.min(transportLimit, env.MAX_TELEGRAM_FILE_BYTES);
   if (fileMsg.message?.document) {
     fileName = fileMsg.message.document.file_name ?? fileName;
     fileUrl = `tg:${fileMsg.message.document.file_id}`;
@@ -80,7 +80,7 @@ export async function newInvoiceConversation(
 
   if (fileSize > downloadLimit) {
     const mb = (fileSize / 1024 / 1024).toFixed(1);
-    const limitLabel = env.TELEGRAM_API_ROOT ? '2 ГБ (локальный сервер)' : '20 МБ (api.telegram.org)';
+    const limitLabel = `${(downloadLimit / 1024 / 1024).toFixed(0)} МБ`;
     await ctx.reply(
       `❌ Файл ${mb} МБ — больше лимита ${limitLabel}.\n\n` +
         `Что делать:\n` +

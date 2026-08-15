@@ -15,17 +15,21 @@
 #   2. docker compose up -d
 #   3. docker compose logs -f bot
 
+name: tnved_bot
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    mem_limit: 1g
+    cpus: "1.0"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-tnved}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
       POSTGRES_DB: ${POSTGRES_DB:-tnved}
       TZ: Asia/Almaty
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - tnved_bot_postgres_data:/var/lib/postgresql/data
       # Migrations applied automatically on FIRST start of an empty volume.
       # For subsequent migrations, run them manually via `docker compose exec`.
       - ./migrations:/docker-entrypoint-initdb.d:ro
@@ -34,14 +38,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # Expose only to localhost by default. To connect from your Mac:
-    #   ssh -L 5432:localhost:5432 user@vps  → psql at localhost:5432 on Mac.
-    ports:
-      - "127.0.0.1:5432:5432"
+    networks:
+      - tnved_bot_network
 
   postgrest:
     image: postgrest/postgrest:v12.2.0
     restart: unless-stopped
+    mem_limit: 256m
+    cpus: "0.5"
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,12 +61,16 @@ services:
       # PostgREST verifies them. Any 32+ char random string works.
       PGRST_JWT_SECRET: ${SUPABASE_JWT_SECRET:?SUPABASE_JWT_SECRET required (32+ char random)}
     # Only reachable inside the compose network — no host port.
+    networks:
+      - tnved_bot_network
 
   bot:
     build:
       context: ./bot
       dockerfile: Dockerfile
     restart: unless-stopped
+    mem_limit: 1536m
+    cpus: "2.0"
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,12 +82,18 @@ services:
       TELEGRAM_API_ID: ${TELEGRAM_API_ID:?TELEGRAM_API_ID required (from my.telegram.org)}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?TELEGRAM_API_HASH required (from my.telegram.org)}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY required}
-      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID}
+      INITIAL_OWNER_TG_USER_ID: ${INITIAL_OWNER_TG_USER_ID}
       # supabase-js talks to our local PostgREST. From the bot's point of view
       # this looks identical to the cloud Supabase — no code changes required.
       SUPABASE_URL: http://postgrest:3000
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?service role JWT required (see MIGRATION.md)}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:?service key JWT required (see MIGRATION.md)}
+      MAX_TELEGRAM_FILE_BYTES: ${MAX_TELEGRAM_FILE_BYTES:-104857600}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - tnved_bot_telegram_data:/var/lib/telegram-bot-api
+      - tnved_bot_telegram_tmp:/tmp/telegram-bot-api
+    networks:
+      - tnved_bot_network
     logging:
       driver: json-file
       options:
@@ -87,4 +101,13 @@ services:
         max-file: "3"
 
 volumes:
-  postgres_data:
+  tnved_bot_postgres_data:
+    name: tnved_bot_postgres_data
+  tnved_bot_telegram_data:
+    name: tnved_bot_telegram_data
+  tnved_bot_telegram_tmp:
+    name: tnved_bot_telegram_tmp
+
+networks:
+  tnved_bot_network:
+    name: tnved_bot_network

@@ -44,6 +44,7 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
   }
 
   const rawPath = meta.result.file_path;
+  const safeRawPath = redactTelegramLocalPath(rawPath, token);
 
   // Local Bot API server (--local) returns absolute filesystem paths like
   // /var/lib/telegram-bot-api/<TOKEN>/documents/file_0.xlsx. When the bot is
@@ -52,10 +53,10 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
   if (rawPath.startsWith('/var/lib/telegram-bot-api/')) {
     try {
       const buf = await readFile(rawPath);
-      logger.info({ fileId, bytes: buf.length, path: rawPath }, 'file read from local disk');
+      logger.info({ fileId, bytes: buf.length, path: safeRawPath }, 'file read from local disk');
       return buf;
     } catch (err) {
-      logger.warn({ err, rawPath }, 'local disk read failed, falling back to HTTP');
+      logger.warn({ err, rawPath: safeRawPath }, 'local disk read failed, falling back to HTTP');
       // fall through to HTTP attempts below
     }
   }
@@ -75,7 +76,15 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
     ]),
   );
 
-  logger.info({ fileId, rawPath, apiBase, candidates }, 'attempting telegram file download (HTTP)');
+  logger.info(
+    {
+      fileId,
+      rawPath: safeRawPath,
+      apiBase,
+      candidates: candidates.map((url) => redactTelegramFileUrl(url)),
+    },
+    'attempting telegram file download (HTTP)',
+  );
 
   let lastError: { url: string; status: number; body: string } | null = null;
   for (const url of candidates) {
@@ -83,19 +92,30 @@ export async function fetchTelegramFile(fileId: string): Promise<Buffer> {
     if (dlRes.ok) {
       const buf = Buffer.from(await dlRes.arrayBuffer());
       logger.info(
-        { fileId, bytes: buf.length, urlUsed: url, rawPath },
+        { fileId, bytes: buf.length, urlUsed: redactTelegramFileUrl(url), rawPath: safeRawPath },
         'telegram file downloaded via HTTP',
       );
       return buf;
     }
     const body = (await dlRes.text()).slice(0, 200);
-    lastError = { url, status: dlRes.status, body };
-    logger.warn({ url, status: dlRes.status, body }, 'download attempt failed, trying next URL');
+    lastError = { url: redactTelegramFileUrl(url), status: dlRes.status, body };
+    logger.warn(
+      { url: redactTelegramFileUrl(url), status: dlRes.status, body },
+      'download attempt failed, trying next URL',
+    );
   }
   throw new Error(
     `Telegram file download failed (${candidates.length} URLs tried). ` +
       `Last: HTTP ${lastError?.status} from ${lastError?.url} — ${lastError?.body}`,
   );
+}
+
+export function redactTelegramFileUrl(url: string): string {
+  return url.replace(/\/bot[^/?]+/g, '/bot<redacted>');
+}
+
+export function redactTelegramLocalPath(path: string, token: string): string {
+  return path.replaceAll(token, '<redacted>');
 }
 
 function stripPrefix(path: string, prefixes: string[]): string {

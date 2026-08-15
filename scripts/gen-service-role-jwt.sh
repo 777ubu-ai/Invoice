@@ -3,7 +3,7 @@
 #
 # Reads SUPABASE_JWT_SECRET and POSTGRES_USER from ./.env (or the environment)
 # and prints a long-lived JWT to stdout. Copy the output into your .env under
-# SUPABASE_SERVICE_ROLE_KEY.
+# SUPABASE_SERVICE_KEY.
 #
 # Requires: openssl, python3 (both are on every Ubuntu/Debian by default).
 

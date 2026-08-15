@@ -65,14 +65,15 @@ nano .env  # или vim, что удобнее
 | Переменная | Где взять |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | @BotFather в Telegram → твой бот → API Token |
-| `OWNER_TELEGRAM_ID` | @userinfobot в Telegram → скажет твой numeric id |
+| `INITIAL_OWNER_TG_USER_ID` | @userinfobot в Telegram → скажет твой numeric id |
 | `TELEGRAM_API_ID` + `TELEGRAM_API_HASH` | my.telegram.org → Login → API development tools → создать App. Нужны для локального Bot API-сервера (файлы до 2 ГБ). |
+| `MAX_TELEGRAM_FILE_BYTES` | Production upload policy. По умолчанию 104857600 (100 МБ), чтобы packing list не мог забить диск VPS. |
 | `ANTHROPIC_API_KEY` | console.anthropic.com/settings/keys → Create Key |
 | `POSTGRES_PASSWORD` | сгенерируй: `openssl rand -base64 24` — вставь результат |
 | `SUPABASE_JWT_SECRET` | сгенерируй: `openssl rand -base64 48` — вставь результат |
-| `SUPABASE_SERVICE_ROLE_KEY` | сгенерируется на следующем шаге |
+| `SUPABASE_SERVICE_KEY` | сгенерируется на следующем шаге |
 
-Пока `SUPABASE_SERVICE_ROLE_KEY` оставь пустым.
+Пока `SUPABASE_SERVICE_KEY` оставь пустым.
 
 ---
 
@@ -82,7 +83,7 @@ nano .env  # или vim, что удобнее
 
 ```bash
 ./scripts/gen-service-role-jwt.sh
-# Скопируй вывод в .env → SUPABASE_SERVICE_ROLE_KEY
+# Скопируй вывод в .env → SUPABASE_SERVICE_KEY
 ```
 
 Открой снова `.env`, вставь получившийся `eyJ...`, сохрани.
@@ -207,7 +208,7 @@ Postgres и PostgREST не трогаются — только бот перес
 
 ```bash
 # /etc/cron.d/tnved-bot-backup
-0 3 * * * root cd /opt/tnved-bot && docker compose exec -T postgres pg_dump -U tnved tnved | gzip > /backup/tnved_$(date +\%Y\%m\%d).sql.gz
+0 3 * * * root cd /opt/tnved-bot && docker compose exec -T postgres pg_dump -U tnved tnved | gzip > /var/backups/tnved-bot/tnved_$(date +\%Y\%m\%d).sql.gz
 ```
 
 Хранить в облаке — можно rclone → S3/B2. Скажи, распишу.
@@ -225,7 +226,7 @@ docker compose logs bot | tail -50
 Смотри последнее исключение. Часто это:
 - `TELEGRAM_BOT_TOKEN` не заполнен → нет токена
 - `ANTHROPIC_API_KEY` невалиден → 401 от Anthropic
-- `SUPABASE_SERVICE_ROLE_KEY` не соответствует `SUPABASE_JWT_SECRET` → 401 от PostgREST (перегенерируй JWT)
+- `SUPABASE_SERVICE_KEY` не соответствует `SUPABASE_JWT_SECRET` → 401 от PostgREST (перегенерируй JWT)
 
 ### PostgREST не может подключиться к Postgres
 

@@ -1,12 +1,7 @@
 node_modules/
 dist/
-*.log
 .env
-.env.local
 .env.*
 !.env.example
-.env.*.local
-.DS_Store
+*.log
 coverage/
-.tsbuildinfo
-*.tsbuildinfo

@@ -14,7 +14,7 @@ async function main() {
   let bot: ReturnType<typeof createBot> | undefined;
   try {
     await store.checkSchema();
-    bot = createBot(config.token, kind, store, config.ownerIds);
+    bot = createBot(config.token, kind, store, config.ownerIds, process.env.TARIFF_GRID_PATH);
     bot.catch(() => console.error('Не удалось обработать обновление. Проверьте подключение и права.'));
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
       process.once(signal, () => { if (bot?.isRunning()) bot.stop(); });

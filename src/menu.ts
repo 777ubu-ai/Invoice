@@ -23,6 +23,7 @@ export const HOME = {
   sections: '📋 Структура работы',
   access: '👤 Мой доступ',
   help: '❓ Помощь',
+  grid: '🏷 Сетка ТН ВЭД',
 } as const;
 
 export function scopeText(kind: BotKind, roles: readonly Role[]): string {

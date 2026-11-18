@@ -61,6 +61,22 @@ test('accountant sees finances in Invoice Bot but not document preparation', asy
   assert.match(text, /ещё не подключены/);
 });
 
+test('accountant cannot query restricted grid even with a typed command', async () => {
+  const { bot, calls } = harness('invoice', ['accountant']);
+  await bot.handleUpdate(message('/price 3916100000'));
+  assert.equal(calls[0]!.payload.text, 'Нет доступа к сетке.');
+});
+
+test('owner receives clear guidance for grid without treating invalid codes as valid', async () => {
+  const { bot, calls } = harness('invoice', [], [42]);
+  await bot.handleUpdate(message(HOME.grid));
+  await bot.handleUpdate(message('/price 123'));
+  await bot.handleUpdate(message('/price 3916100000'));
+  assert.match(String(calls[0]!.payload.text), /\/price/);
+  assert.match(String(calls[1]!.payload.text), /\/price/);
+  assert.match(String(calls[2]!.payload.text), /ещё не подключена/);
+});
+
 test('owner can enter both bots; unknown user cannot enter either', async () => {
   for (const kind of ['packing', 'invoice'] as const) {
     const owner = harness(kind, [], [42]);

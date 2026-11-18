@@ -26,13 +26,13 @@ export function editCommercialItem(work:CommercialInvoice,index:number,field:str
   case 'name':x.name=v;if(x.code)x.codeConfirmed=false;break;
   case 'code':if(!/^\d{10}$/.test(v))throw new Error('Код должен содержать 10 цифр.');x.code=v;x.codeConfirmed=false;break;
   case 'qty':if(!scaled(v))throw new Error('Количество должно быть больше нуля.');x.quantity=v.replace(',','.');if(x.unitPrice)x.amount=lineAmount(x.quantity,x.unitPrice);break;
-  case 'price':scaled(v);x.unitPrice=v.replace(',','.');x.amount=lineAmount(x.quantity,x.unitPrice);break;
+  case 'price':scaled(v,10);x.unitPrice=v.replace(',','.');x.amount=lineAmount(x.quantity,x.unitPrice);break;
   case 'unit':x.unit=v;break;
   case 'net':case 'gross':scaled(v);x[field]=v.replace(',','.');if(x.net&&x.gross&&scaled(x.net)>scaled(x.gross))throw new Error('Нетто не может превышать брутто.');break;
   case 'packages':if(!/^\d+$/.test(v))throw new Error('Количество мест должно быть целым числом.');x.packages=v;break;
   default:throw new Error('Поле недоступно.');
  }
- if(field==='qty'||field==='price'){x.priceMismatch=false;w.priceMethod='manual';w.rate=undefined;}
+ if(field==='qty'||field==='price'){x.priceMismatch=false;if(w.priceMethod==='kg'||w.priceMethod==='source')w.target=undefined;w.priceMethod='manual';w.rate=undefined;}
  return w;
 }
 export function commercialTotal(work:CommercialInvoice):string {return money(work.items.reduce((a,x)=>a+(x.amount?cents(x.amount):0n),0n));}

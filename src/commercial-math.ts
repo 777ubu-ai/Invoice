@@ -4,22 +4,21 @@ import { money } from './invoice-draft.js';
 // decimal places; currency allocations use integer cents.
 export function scaled(value:string,places=6):bigint {
   const s=value.trim().replace(',','.');
-  const m=s.match(/^(\d{1,12})(?:\.(\d{1,6}))?$/);
-  if(!m)throw new Error('Введите неотрицательное число, не более 6 знаков после запятой.');
-  const f=m[2]??'';if(f.length>places)throw new Error('Слишком много знаков после запятой.');
+  const m=s.match(/^(\d{1,12})(?:\.(\d+))?$/);
+  if(!m)throw new Error('Введите неотрицательное число.');
+  const f=m[2]??'';if(f.length>places)throw new Error(`Допустимо не более ${places} знаков после запятой.`);
   return BigInt(m[1]!)*10n**BigInt(places)+BigInt((f+'0'.repeat(places)).slice(0,places)||'0');
 }
 export function cents(value:string):bigint {return scaled(value,2);}
-function decimal6(n:bigint):string {const a=n/1000000n,b=String(n%1000000n).padStart(6,'0').replace(/0+$/,'');return b?`${a}.${b}`:String(a);}
+function decimalAt(n:bigint,places:number):string {const scale=10n**BigInt(places),a=n/scale,b=String(n%scale).padStart(places,'0').replace(/0+$/,'');return b?`${a}.${b}`:String(a);}
 export function lineAmount(quantity:string,price:string):string {
- const q=scaled(quantity),p=scaled(price);if(!q)throw new Error('Количество должно быть больше нуля.');
- const den=1000000000000n;return money((q*p*100n+den/2n)/den);
+ const q=scaled(quantity),p=scaled(price,10);if(!q)throw new Error('Количество должно быть больше нуля.');
+ const den=10000000000000000n;return money((q*p*100n+den/2n)/den);
 }
 export function priceForAmount(quantity:string,amount:string):string {
  const q=scaled(quantity),v=cents(amount);if(!q)throw new Error('Количество должно быть больше нуля.');
- const p=(v*10000000000n+q/2n)/q;const display=decimal6(p);
- if(lineAmount(quantity,display)!==money(v))throw new Error('Невозможно представить точную сумму позиции с этой точностью цены. Уточните цену или количество.');
- return display;
+ for(let places=2;places<=10;places++){const p=(v*10n**BigInt(places+4)+q/2n)/q;const display=decimalAt(p,places);if(lineAmount(quantity,display)===money(v))return display;}
+ throw new Error('Невозможно представить точную сумму позиции с этой точностью цены. Уточните цену или количество.');
 }
 // Hamilton apportionment preserves the total down to a cent and is deterministic.
 export function allocate(total:string,weights:string[]):string[] {

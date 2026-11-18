@@ -9,6 +9,7 @@ export function commercialIssues(w:CommercialInvoice):string[] {
  const errors:string[]=[];
  if(w.packingPending)errors.push('обработка последнего загруженного packing');
  if(!w.seller?.name||!w.seller.address)errors.push('продавец и его адрес');
+ if(!w.shipper?.name||!w.shipper.address)errors.push('отправитель и его адрес');
  if(!w.buyer?.name||!w.buyer.address)errors.push('покупатель и его адрес');
  if(!w.consignee?.name||!w.consignee.address)errors.push('грузополучатель и его адрес');
  if(!w.number)errors.push('номер инвойса');if(!w.date)errors.push('дата инвойса');

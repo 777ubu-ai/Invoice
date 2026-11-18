@@ -3,8 +3,8 @@ import { resolve } from 'node:path';
 import type { InvoiceWork } from './packing-invoice.js';
 
 const blank='[УКАЗАТЬ]';
-function numeric(value:string|undefined):number|null {
-  if(!value || !/^\d{1,12}(?:\.\d{1,6})?$/.test(value))return null;
+function numeric(value:string|undefined,maxScale=6):number|null {
+  if(!value || !/^\d{1,12}(?:\.\d+)?$/.test(value)||(value.split('.')[1]?.length??0)>maxScale)return null;
   // Excel stores only 15 significant decimal digits. Reject rather than silently alter values.
   if(value.replace('.','').replace(/^0+/,'').replace(/0+$/,'').length>15)throw new Error('Число слишком точное для Excel.');
   return Number(value);
@@ -40,9 +40,9 @@ export async function specificationWorkbook(work:InvoiceWork,final=false):Promis
   const missing:ExcelJS.Fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF2CC'}};
   for(const [i,item] of work.items.entries()){
     const r=15+i,row=s.getRow(r),ref=s.getRow(21);if(r>=22){row.height=32;for(let c=1;c<=15;c++)row.getCell(c).style=structuredClone(ref.getCell(c).style);}
-    const cells:(string|number|null)[]=[i+1,item.name,item.brand||null,item.code||null,item.maker||null,item.origin||null,numeric(item.quantity),numeric(item.packages),null,item.packaging||null,numeric(item.gross),numeric(item.net),numeric(item.unitPrice||unitPrice(item.amount,item.quantity)),({pcs:'ШТ',set:'КОМПЛЕКТ'} as Record<string,string>)[item.unit.toLowerCase()]||item.unit||null,numeric(item.amount)];
+    const cells:(string|number|null)[]=[i+1,item.name,item.brand||null,item.code||null,item.maker||null,item.origin||null,numeric(item.quantity),numeric(item.packages),null,item.packaging||null,numeric(item.gross),numeric(item.net),numeric(item.unitPrice||unitPrice(item.amount,item.quantity),10),({pcs:'ШТ',set:'КОМПЛЕКТ'} as Record<string,string>)[item.unit.toLowerCase()]||item.unit||null,numeric(item.amount)];
     cells.forEach((v,j)=>{const cell=row.getCell(j+1);cell.value=v;if(v===null)cell.fill=missing;});
-    row.getCell(11).numFmt=(item.gross?.split('.')[1]?.length??0)>3?'#,##0.000000':'#,##0.000';row.getCell(12).numFmt=(item.net?.split('.')[1]?.length??0)>3?'#,##0.000000':'#,##0.000';row.getCell(13).numFmt='0.000000';row.getCell(15).numFmt=(item.amount?.split('.')[1]?.length??0)>2?'#,##0.000000':'#,##0.00';row.height=32;
+    row.getCell(11).numFmt=(item.gross?.split('.')[1]?.length??0)>3?'#,##0.000000':'#,##0.000';row.getCell(12).numFmt=(item.net?.split('.')[1]?.length??0)>3?'#,##0.000000':'#,##0.000';row.getCell(13).numFmt=(item.unitPrice?.split('.')[1]?.length??0)>6?'0.0000000000':'0.000000';row.getCell(15).numFmt=(item.amount?.split('.')[1]?.length??0)>2?'#,##0.000000':'#,##0.00';row.height=32;
   }
   // Clear spare example rows for short invoices.
   for(let r=15+work.items.length;r<total;r++)for(let c=1;c<=15;c++)s.getRow(r).getCell(c).value=null;

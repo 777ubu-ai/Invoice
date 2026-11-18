@@ -1,4 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';
-import {parseCompanyLines,readCompanyDocument} from '../src/commercial-companies.js';
+import {parseCompanyLines,readCompanyDocument,fromBuyerProfile} from '../src/commercial-companies.js';
 test('company text imports only labelled data',()=>{const c=parseCompanyLines(['Название: Example Ltd','Address: Test street 1','ИНН: 12345','Случайная строка','Bank: Test Bank']);assert.equal(c.name,'Example Ltd');assert.equal(c.address,'Test street 1');assert.equal(c.taxId,'12345');assert.equal(c.bank,'Test Bank');assert.equal(c.account,'');});
 test('rejects fake document and does not invent missing fields',async()=>{await assert.rejects(readCompanyDocument('company.pdf',Buffer.from('not a pdf')));const c=parseCompanyLines(['Country: China']);assert.equal(c.country,'China');assert.equal(c.name,'');assert.equal(c.address,'');});
+
+test('buyer profile retains all supplied currency accounts',()=>{const c=fromBuyerProfile({name:'Test',fields:[{label:'Р/с RUR',value:'111'},{label:'Р/с USD',value:'222'},{label:'Р/с EUR',value:'333'}]});assert.match(c.account,/111/);assert.match(c.account,/222/);assert.match(c.account,/333/);});

@@ -8,14 +8,14 @@ const labels:Record<string,keyof Omit<Company,'id'>>={
  'name':'name','company':'name','company name':'name','полное наименование организации':'name','наименование':'name','название':'name','название компании':'name',
  'страна':'country','country':'country','юридический адрес':'address','адрес':'address','address':'address','legal address':'address',
  'инн':'taxId','tax id':'taxId','registration number':'taxId','регистрационный номер':'taxId','банк':'bank','реквизиты банка':'bank','bank':'bank','банк получателя':'bank',
- 'р/с':'account','счет':'account','счёт':'account','account':'account','account number':'account','р/с usd':'account',
+ 'р/с':'account','счет':'account','счёт':'account','account':'account','account number':'account','р/с usd':'account','р/с rur':'account','р/с eur':'account',
  'swift':'swift','bic':'swift','бик':'swift','swift/bic':'swift','бик / swift':'swift','контакт':'contact','контакты':'contact','contact':'contact','телефон':'contact','дополнительно':'extra'};
 const cleanLabel=(s:string)=>s.replace(/\s+/g,' ').trim().toLowerCase().replace(/[:：]+$/,'');
 export function parseCompanyLines(lines:string[]):Omit<Company,'id'>{
  const data=emptyCompany();for(const line of lines){const cut=line.search(/[:：|]/);if(cut<1)continue;const k=labels[cleanLabel(line.slice(0,cut))];if(!k)continue;const v=line.slice(cut+1).trim();if(v&&v.length<=2000&&!data[k])data[k]=v;}
  return data;
 }
-export function fromBuyerProfile(p:CompanyProfile):Omit<Company,'id'>{const data=emptyCompany();data.name=p.name;const extra:string[]=[];for(const f of p.fields){const k=labels[cleanLabel(f.label)];if(k&&!data[k])data[k]=f.value;else if(!k || (k!=='name'&&data[k]!==f.value))extra.push(`${f.label}: ${f.value}`);}data.extra=extra.join('\n');return data;}
+export function fromBuyerProfile(p:CompanyProfile):Omit<Company,'id'>{const data=emptyCompany();data.name=p.name;const extra:string[]=[],accounts:string[]=[];for(const f of p.fields){if(/^р\/с(?:\s|$)/i.test(f.label)){accounts.push(`${f.label}: ${f.value}`);continue;}const k=labels[cleanLabel(f.label)];if(k&&!data[k])data[k]=f.value;else if(!k || (k!=='name'&&data[k]!==f.value))extra.push(`${f.label}: ${f.value}`);}data.account=accounts.join('\n');data.extra=extra.join('\n');return data;}
 
 function xmlText(s:string):string{return s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&').replace(/&#(\d+);/g,(_m,n:string)=>String.fromCodePoint(Number(n))).replace(/&#x([0-9a-f]+);/gi,(_m,n:string)=>String.fromCodePoint(parseInt(n,16)));}
 async function docxText(buffer:Buffer):Promise<string[]> {

@@ -22,6 +22,7 @@ test('owner uploads a standard packing, reviews, edits with buttons and download
   for(let i=0;i<100&&!saved;i++)await new Promise(r=>setTimeout(r,10));assert.ok(saved);assert.equal(saved.items[0]!.unitPrice,'2.5000');
   const id=saved.id.slice(0,8);await bot.handleUpdate(cb(`v:${id}:item:0`));assert.match(String(calls.at(-1)!.payload.text),/Тест/);
   await bot.handleUpdate(cb(`v:${id}:edit:code`));await bot.handleUpdate(msg('1234567890'));assert.equal(saved.items[0]!.code,'1234567890');
+  await bot.handleUpdate(cb(`v:${id}:wizard:0`));assert.match(String(calls.at(-1)!.payload.text),/Шаг 1 из/);await bot.handleUpdate(msg('TEST-1'));assert.equal(saved.invoiceNumber,'TEST-1');assert.match(String(calls.at(-1)!.payload.text),/Шаг 2 из/);await bot.handleUpdate(cb(`v:${id}:wizard:2`));assert.match(String(calls.at(-1)!.payload.text),/Шаг 3 из/);
   await bot.handleUpdate(cb(`v:${id}:preview`));assert.equal(calls.at(-1)!.method,'sendDocument');
   await bot.handleUpdate(cb(`v:${id}:approve`));assert.match(String(calls.at(-1)!.payload.text),/Перед выпуском/);
  }finally{globalThis.fetch=originalFetch;}

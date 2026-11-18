@@ -1,6 +1,6 @@
 import { canPrepareInvoice, type BotKind, type Role } from './access.js';
 
-// This catalog describes the agreed scope. No business operation is enabled yet.
+// This catalog describes the remaining agreed scope, not a set of buttons.
 export function plannedSections(kind: BotKind, roles: readonly Role[]): string[] {
   const owner = roles.includes('owner');
   if (kind === 'packing') {
@@ -24,10 +24,11 @@ export const HOME = {
   access: '👤 Мой доступ',
   help: '❓ Помощь',
   grid: '🏷 Сетка ТН ВЭД',
+  newInvoice: '📝 Черновик инвойса',
 } as const;
 
 export function scopeText(kind: BotKind, roles: readonly Role[]): string {
   return `Запланированные разделы ${kind === 'packing' ? 'Packing Bot' : 'Invoice Bot'}:\n\n`
     + plannedSections(kind, roles).map(s => `• ${s}`).join('\n')
-    + '\n\nЭто новая основа системы. Загрузка, расчёты и выпуск документов ещё не подключены.';
+    + '\n\nАвтоматическая загрузка, расчёты платежей и выпуск документов ещё не подключены.';
 }

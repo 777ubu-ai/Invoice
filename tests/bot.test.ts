@@ -4,6 +4,7 @@ import type { Update, UserFromGetMe } from 'grammy/types';
 import { createBot } from '../src/bot.js';
 import { HOME } from '../src/menu.js';
 import type { Role } from '../src/access.js';
+import type { Draft, InvoiceDraftStore } from '../src/invoice-draft.js';
 
 const botInfo: UserFromGetMe = {
   id: 123, is_bot: true, first_name: 'Test', username: 'test_bot',
@@ -22,14 +23,14 @@ function message(text: string, privateChat = true): Update {
   } };
 }
 
-function harness(kind: 'packing' | 'invoice', roles: Role[], owners: number[] = []) {
+function harness(kind: 'packing' | 'invoice', roles: Role[], owners: number[] = [], invoiceStore?: InvoiceDraftStore) {
   const state = { roles, failed: false, reads: 0 };
   const calls: { method: string; payload: Record<string, unknown> }[] = [];
   const bot = createBot('123:test', kind, { async rolesFor() {
     state.reads++;
     if (state.failed) throw new Error('database unavailable');
     return state.roles;
-  } }, owners);
+  } }, owners, '', invoiceStore);
   bot.botInfo = botInfo;
   bot.api.config.use(async (_prev, method, payload) => {
     calls.push({ method, payload: payload as unknown as Record<string, unknown> });
@@ -65,6 +66,29 @@ test('accountant cannot query restricted grid even with a typed command', async 
   const { bot, calls } = harness('invoice', ['accountant']);
   await bot.handleUpdate(message('/price 3916100000'));
   assert.equal(calls[0]!.payload.text, 'Нет доступа к сетке.');
+});
+
+test('accountant cannot create draft even if invoking the command directly', async () => {
+  let saved = 0;
+  const { bot, calls } = harness('invoice', ['accountant'], [], {async saveDraft() { saved++; }});
+  await bot.handleUpdate(message('/invoice'));
+  assert.match(String(calls[0]!.payload.text), /Нет доступа/);
+  assert.equal(saved,0);
+});
+
+test('owner creates and receives a labelled draft after confirming its contents', async () => {
+  const saved: Draft[] = [];
+  const { bot, calls } = harness('invoice', [], [42], {async saveDraft(d) { saved.push(d); }});
+  for (const text of ['/invoice','INV-7','2026-11-18','Seller','Buyer','USD','Cable | 3 | pcs | 1.25']) {
+    await bot.handleUpdate(message(text));
+  }
+  assert.match(String(calls.at(-1)!.payload.text), /3\.75 USD/);
+  assert.equal(saved.length,0);
+  await bot.handleUpdate(message('/save'));
+  assert.equal(saved.length,1);
+  assert.equal(saved[0]!.totalCents,'375');
+  assert.equal(calls.at(-1)!.method,'sendDocument');
+  assert.match(String(calls.at(-1)!.payload.caption), /Черновик/);
 });
 
 test('owner receives clear guidance for grid without treating invalid codes as valid', async () => {

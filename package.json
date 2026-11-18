@@ -3,7 +3,9 @@
   "version": "2.0.0-dev",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
@@ -17,8 +19,12 @@
   },
   "dependencies": {
     "dotenv": "^16.4.5",
+    "exceljs": "4.4.0",
     "grammy": "^1.30.0",
     "pg": "^8.13.0"
+  },
+  "overrides": {
+    "exceljs": { "uuid": "11.1.1" }
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.3.14",

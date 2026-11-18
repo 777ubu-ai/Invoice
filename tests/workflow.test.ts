@@ -20,10 +20,10 @@ test('owner uploads a standard packing, reviews, edits with buttons and download
   await bot.handleUpdate(msg(HOME.newInvoice));assert.match(String(calls.at(-1)!.payload.text),/Прикрепите packing/);
   const file=msg('') as {update_id:number;message:NonNullable<Update['message']>};delete (file.message as {text?:string}).text;Object.assign(file.message,{document:{file_id:'f',file_unique_id:'f',file_name:'test.xlsx'}});await bot.handleUpdate(file);
   for(let i=0;i<100&&!saved;i++)await new Promise(r=>setTimeout(r,10));assert.ok(saved);assert.equal(saved.items[0]!.unitPrice,'2.5000');
-  const id=saved.id.slice(0,8);await bot.handleUpdate(cb(`v:${id}:item:0`));assert.match(String(calls.at(-1)!.payload.text),/Тест/);
+  const id=saved.id.slice(0,8);for(let i=0;i<100&&!calls.some(c=>String(c.payload.text).includes('Партия:'));i++)await new Promise(r=>setTimeout(r,10));const panel=calls.find(c=>String(c.payload.text).includes('Партия:'))!;assert.ok((panel.payload.reply_markup as {keyboard?:unknown}).keyboard);assert.doesNotMatch(String(panel.payload.text),/\/number|\/seller/);await bot.handleUpdate(msg('📋 Товары'));assert.match(String(calls.at(-1)!.payload.text),/Тест/);
   await bot.handleUpdate(cb(`v:${id}:edit:code`));await bot.handleUpdate(msg('1234567890'));assert.equal(saved.items[0]!.code,'1234567890');
   await bot.handleUpdate(cb(`v:${id}:wizard:0`));assert.match(String(calls.at(-1)!.payload.text),/Шаг 1 из/);await bot.handleUpdate(msg('TEST-1'));assert.equal(saved.invoiceNumber,'TEST-1');assert.match(String(calls.at(-1)!.payload.text),/Шаг 2 из/);await bot.handleUpdate(cb(`v:${id}:wizard:2`));assert.match(String(calls.at(-1)!.payload.text),/Шаг 3 из/);
   await bot.handleUpdate(cb(`v:${id}:preview`));assert.equal(calls.at(-1)!.method,'sendDocument');
-  await bot.handleUpdate(cb(`v:${id}:approve`));assert.match(String(calls.at(-1)!.payload.text),/Перед выпуском/);
+  await bot.handleUpdate(msg('✅ Сформировать инвойс'));assert.match(String(calls.at(-1)!.payload.text),/Перед выпуском/);assert.doesNotMatch(String(calls.at(-1)!.payload.text),/\/number|позиция 1:/);
  }finally{globalThis.fetch=originalFetch;}
 });

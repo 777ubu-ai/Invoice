@@ -48,12 +48,12 @@ export function editItem(work:InvoiceWork,index:number,field:string,value:string
 
 export function issues(work:InvoiceWork):string[] {
   const issues:string[]=[];
-  if(!work.invoiceNumber)issues.push('номер инвойса (/number)');
-  if(!work.invoiceDate)issues.push('дата (/date)');
-  if(!work.seller)issues.push('продавец и адрес (/seller)');
+  if(!work.invoiceNumber)issues.push('номер инвойса');
+  if(!work.invoiceDate)issues.push('дата инвойса');
+  if(!work.seller)issues.push('продавец и адрес');
   if(!work.contract)issues.push('номер и дата контракта');
-  if(!work.terms)issues.push('условия поставки и оплаты (/terms)');
-  if(!['USD','EUR','RUB','KZT','CNY'].includes(work.currency))issues.push('валюта (/currency)');
+  if(!work.terms)issues.push('условия поставки и оплаты');
+  if(!['USD','EUR','RUB','KZT','CNY'].includes(work.currency))issues.push('валюта');
   work.items.forEach((item,i)=>{
     const missing:string[]=[];
     if(!item.name)missing.push('наименование');

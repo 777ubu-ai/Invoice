@@ -32,6 +32,8 @@ export function editCommercialItem(work:CommercialInvoice,index:number,field:str
   case 'packages':if(!/^\d+$/.test(v))throw new Error('Количество мест должно быть целым числом.');x.packages=v;break;
   default:throw new Error('Поле недоступно.');
  }
+ if((field==='net'||field==='gross')&&w.priceMethod==='kg'&&w.rate&&w.rateBasis===field)return priceByWeight(w,w.rate,field);
+ if((field==='net'||field==='gross')&&w.priceMethod==='total'&&w.target&&w.distribution===field)return distribute(w,w.target,field);
  if(field==='qty'||field==='price'){x.priceMismatch=false;if(w.priceMethod==='kg'||w.priceMethod==='source')w.target=undefined;w.priceMethod='manual';w.rate=undefined;}
  return w;
 }

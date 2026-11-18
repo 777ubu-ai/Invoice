@@ -24,6 +24,7 @@ test('owner uploads a standard packing, reviews, edits with buttons and download
   await bot.handleUpdate(cb(`v:${id}:edit:code`));await bot.handleUpdate(msg('1234567890'));assert.equal(saved.items[0]!.code,'1234567890');
   await bot.handleUpdate(cb(`v:${id}:wizard:0`));assert.match(String(calls.at(-1)!.payload.text),/Шаг 1 из/);await bot.handleUpdate(msg('TEST-1'));assert.equal(saved.invoiceNumber,'TEST-1');assert.match(String(calls.at(-1)!.payload.text),/Шаг 2 из/);await bot.handleUpdate(cb(`v:${id}:wizard:2`));assert.match(String(calls.at(-1)!.payload.text),/Шаг 3 из/);
   await bot.handleUpdate(cb(`v:${id}:preview`));assert.equal(calls.at(-1)!.method,'sendDocument');
+  await bot.handleUpdate(msg('📊 Предварительный расчёт'));assert.match(String(calls.at(-1)!.payload.text),/Общий расчёт новых партий ещё не подключён/);
   await bot.handleUpdate(msg('✅ Сформировать инвойс'));assert.match(String(calls.at(-1)!.payload.text),/Перед выпуском/);assert.doesNotMatch(String(calls.at(-1)!.payload.text),/\/number|позиция 1:/);
  }finally{globalThis.fetch=originalFetch;}
 });

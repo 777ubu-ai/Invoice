@@ -1,27 +1,81 @@
-# TNVED.ai — Invoice automation
+# Packing Invoice — новая основа
 
-Repository for TNVED.ai project. Monorepo layout:
+Перезапуск проекта от 18.11.2026. Два Telegram-бота: **Packing Bot** и **Invoice Bot**,
+общая PostgreSQL и роли. Третий бот не нужен. Логистика отложена.
 
+## Что работает в этой версии
+
+- Раздельный запуск двух ботов с разными токенами.
+- Серверная проверка прав на каждое обновление, только в личных чатах.
+- Руководитель в обоих ботах; бухгалтер только в Invoice Bot, если ему отдельно
+  не назначили другую рабочую роль.
+- `/start`, `/menu`, `/me`, `/help`, просмотр своей роли и согласованной структуры отделов.
+- Новая схема пользователей и журнал назначения ролей, административная CLI.
+- Старые кнопки и команды не вызывают старый pipeline.
+
+**Загрузка пакингов, распознавание, сетки, расчёты, согласование, генерация инвойсов,
+финансовые операции и выгрузки ещё не реализованы.** На экранах это обозначено явно;
+каталог разделов не выдаётся за действующие функции. Веб-приложение из ТЗ также предстоит сделать.
+
+## Запуск в разработке
+
+Требования: Node.js 22+, PostgreSQL, два токена BotFather, Telegram ID руководителя.
+Используйте отдельную новую базу. Старая база не нужна для запуска этой основы.
+
+```sh
+npm ci
+cp .env.example .env
+# Заполнить .env локально; секреты не отправлять в репозиторий или чат.
+npm run db:migrate
+npm run user:set-roles -- 123456789 packing,reviewer
+npm run user:set-roles -- 987654321 accountant
+npm run build
 ```
-.
-├── bot/         Telegram bot (Sprint 3) — see bot/README.md
-├── api-mock/    Mock Sprint 2 API (used by the bot until the real API exists)
-├── migrations/  SQL migrations applied to Supabase
-└── docs/        Architecture and operator guides
+
+В двух отдельных процессах с одинаковым DATABASE_URL:
+
+```sh
+npm run start:packing
+npm run start:invoice
 ```
 
-## Sprint 3 — Telegram bot for operators
+Каждый сотрудник запускает нужный бот через `/start`. Самостоятельная регистрация
+не выдаёт права. Значения ID в примерах условные. Пользователи из OWNER_TELEGRAM_IDS
+всегда имеют роль руководителя; изменение списка требует перезапуска процессов.
+Остальные роли читаются из базы на каждом обновлении. Многоролевой сотрудник имеет
+объединение доступов; бухгалтеру назначается только `accountant`.
 
-Status: in progress on branch `claude/telegram-bot-planning-zXqOn`.
+Миграция выполняется только отдельной командой, транзакционно и повторно безопасно.
+Она создаёт namespace `packing_invoice_v2`, не меняет старые таблицы и данные.
+При недоступной БД бот не разрешает доступ по умолчанию. Работа с секретами использует
+настройки окружения сервера; старые Railway/Supabase конфигурации не переиспользуются.
 
-See `bot/README.md` for development setup and `TNVED Sprint3 Telegram TZ v1.pdf` for the
-spec.
+## Проверки
 
-## Infrastructure
+```sh
+npm run typecheck
+npm test
+npm run build
+```
 
-Currently deployed on **Railway** + **Supabase** (`tnved-bot` project, region
-eu-central-1) — schema in `migrations/`. Telegram bot: `@InvoiceAgentsBot`.
+Тесты не обращаются к Telegram и рабочей БД. SQL проверяется на встроенном PostgreSQL
+PGlite; доступ и обработчики проверяются на синтетических Telegram updates.
 
-Self-hosting on your own VPS (Postgres + PostgREST + bot in Docker Compose,
-no code changes required) is set up and documented in **`MIGRATION.md`** at
-the repo root.
+## Старый проект и возврат
+
+Старый код сохранён на GitHub в ветке
+`backup/before-packing-invoice-rebuild-2026-11-18`, commit
+`c6617890e49f75a48c9d01e85891600d61210e0a`.
+
+В новой ветке удалены старый одиночный бот, AI pipeline, mock API, старые миграции,
+фиксированные ставки и автоматическое получение нетто из брутто, старые deploy-файлы.
+Это **замена исходного кода**, а не остановка или очистка действующего Telegram-бота.
+Рабочая база, Telegram webhook, файлы и внешний хостинг не изменялись.
+
+Для возврата к старому коду используется резервная ветка и прежняя конфигурация
+развёртывания. Не применять новые миграции к старой схеме и не удалять legacy данные.
+До переключения Telegram нужен отдельный план остановки старого polling/webhook;
+один токен не должен одновременно обслуживаться двумя процессами.
+
+Подробности: [структура отделов и кнопок](docs/workflow.md),
+[этапы реализации](docs/rebuild.md).

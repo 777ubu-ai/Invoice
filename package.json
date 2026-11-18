@@ -1,0 +1,30 @@
+{
+  "name": "packing-invoice",
+  "version": "2.0.0-dev",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "start:packing": "node dist/src/main.js packing",
+    "start:invoice": "node dist/src/main.js invoice",
+    "dev:packing": "tsx src/main.ts packing",
+    "dev:invoice": "tsx src/main.ts invoice",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "user:set-roles": "tsx scripts/set-roles.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "grammy": "^1.30.0",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.14",
+    "@types/node": "^22.19.19",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}

@@ -21,6 +21,8 @@ export function plannedSections(kind: BotKind, roles: readonly Role[]): string[]
 
 export const HOME = {
   sections: '📋 Структура работы',
+  history: '📂 Мои инвойсы',
+  staff: '👥 Сотрудники и доступы',
   access: '👤 Мой доступ',
   help: '❓ Помощь',
   grid: '🏷 Сетка ТН ВЭД',

@@ -40,3 +40,19 @@ test('fresh schema is repeatable, preserves legacy data, and role changes are sh
     await assert.rejects(db.query('INSERT INTO packing_invoice_v2.users VALUES ($1, $2, now())', [43, []]));
   } finally { await db.close(); }
 });
+
+test('invoice access management keeps packing roles and refuses owner changes', async()=>{
+ const db=new PGlite();
+ try{
+  await db.exec(await readFile(new URL('../migrations/001_foundation.sql',import.meta.url),'utf8'));
+  const client={query:async(sql:string,values?:unknown[])=>db.query(sql,values),release(){}};
+  const store=new UserStore({connect:async()=>client,query:client.query} as unknown as Pool);
+  await db.query('INSERT INTO packing_invoice_v2.users(telegram_id,roles) VALUES($1,$2)',[99,['packing']]);
+  assert.deepEqual(await store.setInvoiceAccess(99,'accountant',42),['packing','accountant']);
+  assert.deepEqual(await store.setInvoiceAccess(99,'remove',42),['packing']);
+  await db.query('INSERT INTO packing_invoice_v2.users(telegram_id,roles) VALUES($1,$2)',[100,['owner']]);
+  await assert.rejects(store.setInvoiceAccess(100,'remove',42));
+  assert.deepEqual(await store.rolesFor(100),['owner']);
+  const rows=await db.query('SELECT id FROM packing_invoice_v2.role_changes');assert.equal(rows.rows.length,2);
+ }finally{await db.close();}
+});

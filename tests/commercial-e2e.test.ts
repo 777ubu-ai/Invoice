@@ -38,6 +38,10 @@ test('local Telegram workflow saves parties, issues versioned Excel and resumes 
    await send(HOME.newInvoice);binary=Buffer.from('broken');await bot.handleUpdate(file);let failed=await store.active(42,'own');assert.equal(failed?.phase,'upload');assert.equal(failed?.packingPending,true);const persisted=await store.load(failed!.id,42,'own');assert.equal(Buffer.from(persisted!.source!).toString(),'broken');bot=makeBot();await send('/resume');assert.equal((await store.active(42,'own'))?.id,failed!.id);
    // Standalone company entry survives restarting before saving.
    await send(HOME.company);await bot.handleUpdate(cb('cm:add'));await send('Название: Supplier extra\nАдрес: Test road');bot=makeBot();await send(HOME.company);await bot.handleUpdate(cb('cm:resume'));await bot.handleUpdate(cb('cm:save'));assert.ok((await store.companies()).some(x=>x.name==='Supplier extra'));
+   // Independent CSV import persists the original; unsupported photos are also kept without inventing items.
+   await send(HOME.newInvoice);binary=Buffer.from('Description,Quantity,Unit,Unit Price,Amount, USD\nBolt,2,pcs,3,6,USD\n');(file.message.document as {file_name:string}).file_name='packing.csv';await bot.handleUpdate(file);let csvDraft=await store.active(42,'own');assert.equal(csvDraft?.phase,'packing');assert.equal(csvDraft?.items.length,1);assert.deepEqual(Buffer.from((await store.load(csvDraft!.id,42,'own'))!.source!),binary);
+   await send(HOME.newInvoice);binary=Buffer.from('sample photo');const photo=msg('') as {update_id:number;message:NonNullable<Update['message']>};delete (photo.message as {text?:string}).text;Object.assign(photo.message,{photo:[{file_id:'f',file_unique_id:'f',width:300,height:300,file_size:12}]});await bot.handleUpdate(photo);const photoDraft=await store.active(42,'own');assert.equal(photoDraft?.phase,'upload');assert.equal(photoDraft?.packingPending,true);assert.deepEqual(Buffer.from((await store.load(photoDraft!.id,42,'own'))!.source!),binary);assert.ok(calls.some(c=>String(c.payload.text).includes('Исходный файл сохранён')));
+
 
   }finally{globalThis.fetch=oldFetch;}
  }finally{await db.close();}

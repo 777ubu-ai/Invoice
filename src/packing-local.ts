@@ -34,7 +34,7 @@ export function parsePackingLocally(owner:number,filename:string,buyer:CompanyPr
    const item=work.items[i]!;if(packages!==null)item.packages=(r.cells[packages]??'').trim();
    if(price!==null){const p=(r.cells[price]??'').trim().replace(',','.');if(/^\d{1,12}(?:\.\d{1,6})?$/.test(p)){item.unitPrice=p;try{const calculated=lineAmount(item.quantity,p);if(item.amount)item.priceMismatch=calculated!==lineAmount('1',item.amount);else item.amount=calculated;}catch{item.priceMismatch=true;}}}
   }
-  work.warnings=['Другой формат XLSX: проверьте сопоставление столбцов и лист «Прочие строки».'];return work;
+  work.warnings=['Проверьте сопоставление столбцов и лист «Прочие строки».'];return work;
  }
- throw new Error('Не удалось однозначно найти столбцы наименования и количества. Добавьте заголовки и повторите загрузку.');
+ throw new Error('Не удалось однозначно найти столбцы наименования и количества. Нужна таблица с наименованиями товаров и количеством.');
 }

@@ -47,7 +47,11 @@ export function anthropicSuggest(apiKey:string, model='claude-opus-4-7'): Sugges
         signal:AbortSignal.timeout(120_000),
       });
     } catch { throw new Error('Не удалось связаться с ИИ. Проверьте интернет и попробуйте снова.'); }
-    if (!response.ok) throw new Error(`Сервис ИИ не выполнил запрос (HTTP ${response.status}).`);
+    if (!response.ok) {
+      const body=await response.json().catch(()=>null) as {error?:{message?:string}} | null;
+      if (/credit balance is too low/i.test(body?.error?.message ?? '')) throw new Error('На балансе сервиса ИИ закончились средства. Пополните Anthropic API и повторите загрузку.');
+      throw new Error(`Сервис ИИ не выполнил запрос (HTTP ${response.status}).`);
+    }
     const body=await response.json() as {content?:{type:string;text?:string}[];stop_reason?:string};
     if (body.stop_reason === 'max_tokens') throw new Error('Ответ ИИ обрезан. Разделите файл и повторите.');
     const text=(body.content ?? []).filter(x=>x.type==='text').map(x=>x.text ?? '').join('');

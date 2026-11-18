@@ -6,7 +6,7 @@ import { readDatabaseUrl } from '../src/config.js';
 async function main() {
   const pool = new Pool({ connectionString: readDatabaseUrl(process.env), connectionTimeoutMillis: 10_000 });
   try {
-    const migrations = ['001_foundation.sql', '002_invoice_drafts.sql', '003_buyer_details.sql'];
+    const migrations = ['001_foundation.sql', '002_invoice_drafts.sql', '003_buyer_details.sql', '004_packing_jobs.sql'];
     const client = await pool.connect();
     try {
       await client.query('BEGIN');

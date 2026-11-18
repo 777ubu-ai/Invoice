@@ -4,7 +4,7 @@ import type { Update, UserFromGetMe } from 'grammy/types';
 import { createBot } from '../src/bot.js';
 import { HOME } from '../src/menu.js';
 import type { Role } from '../src/access.js';
-import type { Draft, InvoiceDraftStore } from '../src/invoice-draft.js';
+import type { InvoiceDraftStore } from '../src/invoice-draft.js';
 import type { CompanyProfile } from '../src/company-profile.js';
 
 const sampleBuyer: CompanyProfile = {name:'Тестовый покупатель',fields:[{label:'ИНН',value:'1234567890'}]};
@@ -62,13 +62,7 @@ test('accountant sees finances in Invoice Bot but not document preparation', asy
   const text = String(calls[0]!.payload.text);
   assert.match(text, /Оплаты и расходы/);
   assert.doesNotMatch(text, /Новый инвойс/);
-  assert.match(text, /ещё не подключены/);
-});
-
-test('accountant cannot query restricted grid even with a typed command', async () => {
-  const { bot, calls } = harness('invoice', ['accountant']);
-  await bot.handleUpdate(message('/price 3916100000'));
-  assert.equal(calls[0]!.payload.text, 'Нет доступа к сетке.');
+  assert.match(text, /план/);
 });
 
 test('accountant cannot create draft even if invoking the command directly', async () => {
@@ -77,23 +71,6 @@ test('accountant cannot create draft even if invoking the command directly', asy
   await bot.handleUpdate(message('/invoice'));
   assert.match(String(calls[0]!.payload.text), /Нет доступа/);
   assert.equal(saved,0);
-});
-
-test('owner creates and receives a labelled draft after confirming its contents', async () => {
-  const saved: Draft[] = [];
-  const { bot, calls } = harness('invoice', [], [42], {async saveDraft(d) { saved.push(d); }});
-  for (const text of ['/invoice','INV-7','2026-11-18','Seller','USD','Cable | 3 | pcs | 1.25']) {
-    await bot.handleUpdate(message(text));
-  }
-  assert.match(String(calls.at(-1)!.payload.text), /3\.75 USD/);
-  assert.equal(saved.length,0);
-  await bot.handleUpdate(message('/save'));
-  assert.equal(saved.length,1);
-  assert.equal(saved[0]!.totalCents,'375');
-  assert.equal(saved[0]!.buyer,'Тестовый покупатель');
-  assert.deepEqual(saved[0]!.buyerDetails,sampleBuyer);
-  assert.equal(calls.at(-1)!.method,'sendDocument');
-  assert.match(String(calls.at(-1)!.payload.caption), /Черновик/);
 });
 
 test('company details are visible to accountant without draft access', async () => {
@@ -111,21 +88,11 @@ test('clicking an old inline keyboard attempts to remove it without acting on th
   assert.match(String(calls[1]!.payload.text),/кнопки убраны/);
 });
 
-test('owner receives clear guidance for grid without treating invalid codes as valid', async () => {
-  const { bot, calls } = harness('invoice', [], [42]);
-  await bot.handleUpdate(message(HOME.grid));
-  await bot.handleUpdate(message('/price 123'));
-  await bot.handleUpdate(message('/price 3916100000'));
-  assert.match(String(calls[0]!.payload.text), /\/price/);
-  assert.match(String(calls[1]!.payload.text), /\/price/);
-  assert.match(String(calls[2]!.payload.text), /ещё не подключена/);
-});
-
 test('owner can enter both bots; unknown user cannot enter either', async () => {
   for (const kind of ['packing', 'invoice'] as const) {
     const owner = harness(kind, [], [42]);
     await owner.bot.handleUpdate(message('/menu'));
-    assert.match(String(owner.calls[0]!.payload.text), /новая версия/);
+    assert.match(String(owner.calls[0]!.payload.text), /Bot/);
     assert.equal(owner.state.reads, 0);
     const unknown = harness(kind, []);
     await unknown.bot.handleUpdate(message('/start'));
@@ -151,13 +118,19 @@ test('group chats never receive internal roles or menus', async () => {
   assert.equal(state.reads, 0);
 });
 
-test('old commands and files do not execute the retired pipeline', async () => {
+test('packing uploads require starting a new invoice first', async () => {
   const { bot, calls } = harness('invoice', ['invoice']);
-  await bot.handleUpdate(message('/new_invoice'));
   const file = message('') as { update_id: number; message: NonNullable<Update['message']> };
   delete (file.message as { text?: string }).text;
   Object.assign(file.message, { document: { file_id: 'test', file_unique_id: 'test', file_name: 'packing.xlsx' } });
   await bot.handleUpdate(file);
-  assert.equal(calls.length, 2);
-  for (const call of calls) assert.match(String(call.payload.text), /ещё не подключена/);
+  assert.match(String(calls[0]!.payload.text), /Новый инвойс/);
+});
+
+test('invoice menu offers packing upload and hides retired features', async () => {
+  const {bot,calls}=harness('invoice',[],[42]);
+  await bot.handleUpdate(message('/menu'));
+  const keyboard=JSON.stringify(calls[0]!.payload.reply_markup);
+  assert.match(keyboard,/Новый инвойс/);
+  assert.doesNotMatch(keyboard,/Черновик|Сетка/);
 });

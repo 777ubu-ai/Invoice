@@ -24,12 +24,12 @@ export const HOME = {
   access: '👤 Мой доступ',
   help: '❓ Помощь',
   grid: '🏷 Сетка ТН ВЭД',
-  newInvoice: '📝 Черновик инвойса',
+  newInvoice: '📥 Новый инвойс',
   company: '🏢 Реквизиты ПТК',
 } as const;
 
 export function scopeText(kind: BotKind, roles: readonly Role[]): string {
   return `Запланированные разделы ${kind === 'packing' ? 'Packing Bot' : 'Invoice Bot'}:\n\n`
     + plannedSections(kind, roles).map(s => `• ${s}`).join('\n')
-    + '\n\nАвтоматическая загрузка, расчёты платежей и выпуск документов ещё не подключены.';
+    + '\n\nРазделы перечислены как план; их доступность зависит от текущей версии.';
 }

@@ -16,7 +16,7 @@ export function standardPacking(owner:number,filename:string,buyer:CompanyProfil
   if(!positions.length)return null;
   const invalid=rows.some(r=>r.sheet===header.sheet && r.row>header.row && /^\d+$/.test(r.cells[0]??'') && !r.cells[1]);
   if(invalid)throw new Error('В packing есть строка с номером, но без наименования. Исправьте файл.');
-  const suggestions:SuggestedRow[]=rows.map(r=>({sourceId:r.id,kind:positions.includes(r)?'item':'other',nameColumn:positions.includes(r)?1:null,quantityColumn:positions.includes(r)?4:null,unitColumn:positions.includes(r)?6:null,netColumn:positions.includes(r)?2:null,grossColumn:positions.includes(r)?3:null,amountColumn:positions.includes(r)?7:null,nameRu:positions.includes(r)?r.cells[1]!: '',suggestedCode:'',reason:'Заголовок, итог или прочая строка'}));
+  const suggestions:SuggestedRow[]=rows.map(r=>({sourceId:r.id,kind:positions.includes(r)?'item':'other',nameColumn:positions.includes(r)?1:null,quantityColumn:positions.includes(r)?4:null,unitColumn:positions.includes(r)?6:null,netColumn:positions.includes(r)?2:null,grossColumn:positions.includes(r)?3:null,amountColumn:positions.includes(r)?7:null,nameRu:positions.includes(r)?r.cells[1]!: '',suggestedCode:'',reason:r.sheet===header.sheet&&r.row>header.row&&!!r.cells[1]&&/^\d+(?:[.,]\d+)?$/.test((r.cells[4]??'').trim())&&!positions.includes(r)?'Строка похожа на товар — проверьте':'Заголовок, итог или прочая строка'}));
   const work=createInvoiceWork(owner,filename,buyer,rows,suggestions);work.currency='USD';
   for(const [i,r] of positions.entries()) {
     const item=work.items[i]!;item.packages=r.cells[8]??'';

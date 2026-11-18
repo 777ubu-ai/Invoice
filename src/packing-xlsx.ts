@@ -56,7 +56,7 @@ export async function parsePackingXlsx(buf: Buffer): Promise<PackingRow[]> {
     });
   }
   if (!rows.length) throw new Error('В файле нет данных.');
-  if (rows.length > 150) throw new Error('Больше 150 непустых строк. Разделите packing на несколько файлов.');
-  if (JSON.stringify(rows).length > 180_000) throw new Error('Слишком много текста в файле. Разделите packing.');
+  if (rows.length > 1000) throw new Error('Больше 1000 непустых строк. Разделите packing на несколько файлов.');
+  if (JSON.stringify(rows).length > 1_000_000) throw new Error('Слишком много текста в файле. Разделите packing.');
   return rows;
 }

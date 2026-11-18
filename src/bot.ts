@@ -6,13 +6,15 @@ import { CURRENCIES, createDraft, dateField, draftWorkbook, money, parseItems, v
 import { companySummary, type CompanyProfile } from './company-profile.js';
 import { registerPackingWorkflow } from './packing-workflow.js';
 import type { PackingJobs } from './packing-invoice.js';
+import { registerCommercialWorkflow } from './commercial-workflow.js';
+import type {CommercialStore} from './commercial-store.js';
 
 export interface RoleStore { rolesFor(id: number): Promise<Role[]>; setInvoiceAccess?(id:number,role:'invoice'|'accountant'|'remove',actor:number):Promise<Role[]> }
 
 type Stage = 'number'|'date'|'seller'|'currency'|'items'|'confirm'|'saving';
 type Session = {stage: Stage; profile: CompanyProfile; number?: string; date?: string; seller?: string; currency?: string; draft?: Draft};
 
-export function createBot(token: string, kind: BotKind, store: RoleStore, ownerIds: readonly number[], gridPath = '', invoiceStore?: InvoiceDraftStore, loadBuyer: () => Promise<CompanyProfile> = async () => { throw new Error('profile_missing'); }, packingJobs?: PackingJobs) {
+export function createBot(token: string, kind: BotKind, store: RoleStore, ownerIds: readonly number[], gridPath = '', invoiceStore?: InvoiceDraftStore, loadBuyer: () => Promise<CompanyProfile> = async () => { throw new Error('profile_missing'); }, packingJobs?: PackingJobs, commercialStore?: CommercialStore) {
   const bot = new Bot<Context & { state: { roles: Role[] } }>(token);
   const name = kind === 'packing' ? 'Packing Bot' : 'Invoice Bot';
   const keyboard = (roles: Role[]) => {
@@ -20,7 +22,8 @@ export function createBot(token: string, kind: BotKind, store: RoleStore, ownerI
     if (kind === 'invoice' && canPrepareInvoice(roles)) k.text(HOME.newInvoice).row();
     if (kind === 'invoice') k.text(HOME.history).row().text(HOME.company).row();
     if(kind === 'invoice' && roles.includes('owner')) k.text(HOME.staff).row();
-    return k.text(HOME.access).text(HOME.help).resized();
+    if(kind==='packing')return k.text(HOME.access).text(HOME.help).resized();
+    return k.resized();
   };
 
   // All updates, including stale callbacks and uploaded files, pass this guard.
@@ -46,7 +49,7 @@ export function createBot(token: string, kind: BotKind, store: RoleStore, ownerI
   if (kind === 'invoice') {
     const waitingStaff=new Set<number>();
     bot.use(async(ctx,next)=>{if(ctx.message?.text?.split(' ')[0]==='/cancel' && ctx.from)waitingStaff.delete(ctx.from.id);await next();});
-    registerPackingWorkflow(bot, token, packingJobs, loadBuyer);
+    if(commercialStore)registerCommercialWorkflow(bot,token,commercialStore,packingJobs,loadBuyer);else registerPackingWorkflow(bot, token, packingJobs, loadBuyer);
     bot.hears(HOME.staff,async ctx=>{if(!ctx.state.roles.includes('owner')){await ctx.reply('Доступ только у руководителя.');return;}waitingStaff.add(ctx.from!.id);await ctx.reply('Отправьте числовой Telegram ID сотрудника. Права Packing Bot при этом сохраняются. Для отмены: /cancel.');});
     bot.callbackQuery(/^role:(\d{1,15}):(invoice|accountant|remove)$/,async ctx=>{
       await ctx.answerCallbackQuery();if(!ctx.state.roles.includes('owner')||!store.setInvoiceAccess){await ctx.reply('Доступ только у руководителя.');return;}
@@ -59,8 +62,7 @@ export function createBot(token: string, kind: BotKind, store: RoleStore, ownerI
       try { await ctx.reply(companySummary(await loadBuyer())); }
       catch { await ctx.reply('Реквизиты покупателя не найдены. Обратитесь к руководителю.'); }
     };
-    bot.hears(HOME.company, showCompany);
-    bot.command('company', showCompany);
+    if(!commercialStore){bot.hears(HOME.company, showCompany);bot.command('company', showCompany);}
 
   }
   bot.hears(HOME.sections, ctx => ctx.reply(scopeText(kind, ctx.state.roles as Role[])));

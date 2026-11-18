@@ -35,5 +35,5 @@ test('standard 15-line packing preserves amounts and renders the agreed specific
  assert.equal(work.items.length,15);assert.equal(work.items[0]!.unitPrice,'2.5000');assert.equal(work.items[0]!.priceMismatch,false);assert.equal(work.items[0]!.packages,'1');
  const result=new ExcelJS.Workbook();await result.xlsx.load(await specificationWorkbook(work) as never);
  const spec=result.getWorksheet('Specification')!;assert.equal(spec.getCell('B15').value,'Товар 1');assert.equal(spec.getCell('B29').value,'Товар 15');assert.equal(spec.getCell('M15').value,2.5);assert.equal(spec.getCell('O30').result,3750);assert.equal(spec.getCell('L30').result,151.875);assert.match(String(spec.getCell('B2').value),/ДЛЯ ПРОВЕРКИ/);
- assert.ok(result.getWorksheet('Прочие строки'));assert.ok(result.getWorksheet('Реквизиты ПТК'));
+ assert.ok(result.getWorksheet('Прочие строки'));assert.ok(result.getWorksheet('Участники'));
 });

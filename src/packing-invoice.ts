@@ -8,7 +8,7 @@ import type { SuggestedRow } from './packing-ai.js';
 import { specificationWorkbook } from './specification.js';
 
 export type PackingItem = { sourceId:string; sheet:string; sourceRow:number; original:string; name:string; code:string; quantity:string; unit:string; net:string; gross:string; amount:string; packages?:string; unitPrice?:string; priceMismatch?:boolean; brand?:string; maker?:string; origin?:string; packaging?:string };
-export type InvoiceWork = { id:string; owner:number; filename:string; buyer:CompanyProfile; items:PackingItem[]; omitted:{sheet:string;row:number;cells:string[];reason:string}[]; invoiceNumber:string; invoiceDate:string; seller:string; terms:string; currency:string; contract?:string; loading?:string; delivery?:string; carrier?:string; driver?:string; vehicle?:string; warnings?:string[] };
+export type InvoiceWork = { id:string; owner:number; filename:string; buyer:CompanyProfile; items:PackingItem[]; omitted:{sheet:string;row:number;cells:string[];reason:string}[]; invoiceNumber:string; invoiceDate:string; seller:string; terms:string; currency:string; contract?:string; loading?:string; delivery?:string; carrier?:string; driver?:string; vehicle?:string; warnings?:string[]; consigneeDetails?:CompanyProfile; sellerDetails?:CompanyProfile; shipperDetails?:CompanyProfile; payerDetails?:CompanyProfile };
 
 function decimal(value:string):string {
   const x=value.trim().replace(/\s/g,'').replace(',','.');

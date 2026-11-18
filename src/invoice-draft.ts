@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import ExcelJS from 'exceljs';
 import type { Pool } from 'pg';
+import type { CompanyProfile } from './company-profile.js';
 
 export type Item = { description: string; quantity: string; unit: string; unitPrice: string; cents: string };
-export type Draft = { id: string; createdBy: number; number: string; date: string; seller: string; buyer: string; currency: string; items: Item[]; totalCents: string };
+export type Draft = { id: string; createdBy: number; number: string; date: string; seller: string; buyer: string; buyerDetails?: CompanyProfile; currency: string; items: Item[]; totalCents: string };
 export const CURRENCIES = ['USD','EUR','RUB','KZT','CNY'] as const;
 
 function cleanField(s: string, limit: number): string {
@@ -50,9 +51,9 @@ export class InvoiceStore implements InvoiceDraftStore {
   constructor(private pool: Pool) {}
   async saveDraft(d: Draft) {
     await this.pool.query(`INSERT INTO packing_invoice_v2.invoice_drafts
-      (id,created_by,invoice_number,invoice_date,seller,buyer,currency,items,total_cents)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT (id) DO NOTHING`,
-    [d.id,d.createdBy,d.number,d.date,d.seller,d.buyer,d.currency,JSON.stringify(d.items),d.totalCents]);
+      (id,created_by,invoice_number,invoice_date,seller,buyer,currency,items,total_cents,buyer_details)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb) ON CONFLICT (id) DO NOTHING`,
+    [d.id,d.createdBy,d.number,d.date,d.seller,d.buyer,d.currency,JSON.stringify(d.items),d.totalCents, d.buyerDetails ? JSON.stringify(d.buyerDetails) : null]);
   }
 }
 
@@ -69,5 +70,13 @@ export async function draftWorkbook(d: Draft): Promise<Buffer> {
   sheet.addRow(['Проверить реквизиты, договор, условия оплаты и поставки перед выпуском.']);
   sheet.getRow(1).font = {bold:true}; sheet.getRow(7).font = {bold:true};
   sheet.views = [{state:'frozen',ySplit:7}];
+  if (d.buyerDetails) {
+    const details = book.addWorksheet('Реквизиты покупателя');
+    details.columns = [{width:42},{width:100}];
+    details.addRow(['Покупатель / получатель',d.buyerDetails.name]);
+    for (const field of d.buyerDetails.fields) details.addRow([field.label,field.value]);
+    details.eachRow(row => { row.alignment = {vertical:'top',wrapText:true}; });
+    details.getRow(1).font = {bold:true};
+  }
   return Buffer.from(await book.xlsx.writeBuffer());
 }

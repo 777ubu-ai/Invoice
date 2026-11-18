@@ -5,6 +5,9 @@ import { createBot } from '../src/bot.js';
 import { HOME } from '../src/menu.js';
 import type { Role } from '../src/access.js';
 import type { Draft, InvoiceDraftStore } from '../src/invoice-draft.js';
+import type { CompanyProfile } from '../src/company-profile.js';
+
+const sampleBuyer: CompanyProfile = {name:'Тестовый покупатель',fields:[{label:'ИНН',value:'1234567890'}]};
 
 const botInfo: UserFromGetMe = {
   id: 123, is_bot: true, first_name: 'Test', username: 'test_bot',
@@ -30,7 +33,7 @@ function harness(kind: 'packing' | 'invoice', roles: Role[], owners: number[] = 
     state.reads++;
     if (state.failed) throw new Error('database unavailable');
     return state.roles;
-  } }, owners, '', invoiceStore);
+  } }, owners, '', invoiceStore, async () => sampleBuyer);
   bot.botInfo = botInfo;
   bot.api.config.use(async (_prev, method, payload) => {
     calls.push({ method, payload: payload as unknown as Record<string, unknown> });
@@ -79,7 +82,7 @@ test('accountant cannot create draft even if invoking the command directly', asy
 test('owner creates and receives a labelled draft after confirming its contents', async () => {
   const saved: Draft[] = [];
   const { bot, calls } = harness('invoice', [], [42], {async saveDraft(d) { saved.push(d); }});
-  for (const text of ['/invoice','INV-7','2026-11-18','Seller','Buyer','USD','Cable | 3 | pcs | 1.25']) {
+  for (const text of ['/invoice','INV-7','2026-11-18','Seller','USD','Cable | 3 | pcs | 1.25']) {
     await bot.handleUpdate(message(text));
   }
   assert.match(String(calls.at(-1)!.payload.text), /3\.75 USD/);
@@ -87,8 +90,25 @@ test('owner creates and receives a labelled draft after confirming its contents'
   await bot.handleUpdate(message('/save'));
   assert.equal(saved.length,1);
   assert.equal(saved[0]!.totalCents,'375');
+  assert.equal(saved[0]!.buyer,'Тестовый покупатель');
+  assert.deepEqual(saved[0]!.buyerDetails,sampleBuyer);
   assert.equal(calls.at(-1)!.method,'sendDocument');
   assert.match(String(calls.at(-1)!.payload.caption), /Черновик/);
+});
+
+test('company details are visible to accountant without draft access', async () => {
+  const {bot,calls} = harness('invoice',['accountant']);
+  await bot.handleUpdate(message(HOME.company));
+  assert.match(String(calls[0]!.payload.text), /Тестовый покупатель/);
+  assert.match(String(calls[0]!.payload.text), /1234567890/);
+});
+
+test('clicking an old inline keyboard attempts to remove it without acting on the old command', async () => {
+  const {bot,calls} = harness('invoice',[],[42]);
+  await bot.handleUpdate({update_id:3,callback_query:{id:'old',from:{id:42,is_bot:false,first_name:'Test'},chat_instance:'test',message:(message('/start') as {message:NonNullable<Update['message']>}).message,data:'legacy:choose:alpha'}});
+  assert.equal(calls[0]!.method,'editMessageReplyMarkup');
+  assert.equal(calls[1]!.method,'answerCallbackQuery');
+  assert.match(String(calls[1]!.payload.text),/кнопки убраны/);
 });
 
 test('owner receives clear guidance for grid without treating invalid codes as valid', async () => {

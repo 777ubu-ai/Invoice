@@ -5,6 +5,7 @@ import { readConfig } from './config.js';
 import { createBot } from './bot.js';
 import { UserStore } from './store.js';
 import { InvoiceStore } from './invoice-draft.js';
+import { loadCompanyProfile } from './company-profile.js';
 
 async function main() {
   const kind = parseBotKind(process.argv[2]);
@@ -15,7 +16,7 @@ async function main() {
   let bot: ReturnType<typeof createBot> | undefined;
   try {
     await store.checkSchema();
-    bot = createBot(config.token, kind, store, config.ownerIds, process.env.TARIFF_GRID_PATH, new InvoiceStore(pool));
+    bot = createBot(config.token, kind, store, config.ownerIds, process.env.TARIFF_GRID_PATH, new InvoiceStore(pool), () => loadCompanyProfile(process.env.BUYER_PROFILE_PATH ?? ''));
     bot.catch(() => console.error('Не удалось обработать обновление. Проверьте подключение и права.'));
     for (const signal of ['SIGINT', 'SIGTERM'] as const) {
       process.once(signal, () => { if (bot?.isRunning()) bot.stop(); });

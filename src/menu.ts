@@ -25,6 +25,7 @@ export const HOME = {
   help: '❓ Помощь',
   grid: '🏷 Сетка ТН ВЭД',
   newInvoice: '📝 Черновик инвойса',
+  company: '🏢 Реквизиты ПТК',
 } as const;
 
 export function scopeText(kind: BotKind, roles: readonly Role[]): string {

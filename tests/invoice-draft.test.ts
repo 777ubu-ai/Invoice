@@ -21,11 +21,11 @@ test('manual line totals use exact decimal arithmetic and reject invalid data', 
 test('draft persistence is idempotent and XLSX labels the document as a draft', async () => {
   const db = new PGlite();
   try {
-    for (const name of ['001_foundation.sql','002_invoice_drafts.sql']) {
+    for (const name of ['001_foundation.sql','002_invoice_drafts.sql','003_buyer_details.sql']) {
       await db.exec(await readFile(new URL(`../migrations/${name}`,import.meta.url),'utf8'));
     }
     const store = new InvoiceStore(db as unknown as Pool);
-    const d = createDraft(42,{number:'TEST-1',date:'2026-11-18',seller:'Продавец',buyer:'Покупатель',currency:'USD',items:parseItems('Товар | 3 | шт | 1.25')});
+    const d = createDraft(42,{number:'TEST-1',date:'2026-11-18',seller:'Продавец',buyer:'Покупатель',buyerDetails:{name:'Покупатель',fields:[{label:'ИНН',value:'123'}]},currency:'USD',items:parseItems('Товар | 3 | шт | 1.25')});
     await store.saveDraft(d); await store.saveDraft(d);
     const result = await db.query<{total_cents: string; created_by: string}>('SELECT total_cents, created_by FROM packing_invoice_v2.invoice_drafts');
     assert.equal(result.rows.length,1);
@@ -36,5 +36,8 @@ test('draft persistence is idempotent and XLSX labels the document as a draft', 
     assert.match(String(sheet.getCell('A1').value),/ЧЕРНОВИК/);
     assert.equal(sheet.getCell('F8').value,'3.75');
     assert.equal(sheet.getCell('F9').value,'3.75');
+    assert.equal(book.getWorksheet('Реквизиты покупателя')!.getCell('B2').value,'123');
+    const details = await db.query<{buyer_details:{name:string}}> ('SELECT buyer_details FROM packing_invoice_v2.invoice_drafts');
+    assert.equal(details.rows[0]!.buyer_details.name,'Покупатель');
   } finally { await db.close(); }
 });

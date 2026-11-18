@@ -22,7 +22,7 @@ export function parsePackingLocally(owner:number,filename:string,buyer:CompanyPr
   const price=find(/^(цена(?: за единицу)?|unit price(?:,?\s*(usd|eur|rub|cny|kzt))?|price(?:,?\s*(usd|eur|rub|cny|kzt))?)$/);
   const packages=find(/^(места|количество мест|грузовые места|packages?|cartons?)$/);
   const possible=rows.filter(r=>r.sheet===h.sheet&&r.row>h.row);
-  const isTotal=(v:string)=>/^(?:итого|всего|total|sum|合计|总计|小计)$/i.test(v.trim());
+  const isTotal=(v:string)=>/^(?:итого|всего|total|sum|合计|总计|小计)\s*[:：.]?$/i.test(v.trim());
   const items=possible.filter(r=>!!r.cells[name]&&!isTotal(r.cells[name]!)&&/^\d+(?:[.,]\d+)?$/.test((r.cells[qty]??'').trim()));
   if(!items.length)continue;
   const malformed=possible.some(r=>!!r.cells[name]&&/^\d/.test((r.cells[qty]??'').trim())&&!/^\d+(?:[.,]\d+)?$/.test((r.cells[qty]??'').trim()));

@@ -50,7 +50,7 @@ export function createBot(token: string, kind: BotKind, store: RoleStore, ownerI
     const waitingStaff=new Set<number>();
     bot.use(async(ctx,next)=>{if(ctx.message?.text?.split(' ')[0]==='/cancel' && ctx.from)waitingStaff.delete(ctx.from.id);await next();});
     if(commercialStore)registerCommercialWorkflow(bot,token,commercialStore,packingJobs,loadBuyer);else registerPackingWorkflow(bot, token, packingJobs, loadBuyer);
-    bot.hears(HOME.staff,async ctx=>{if(!ctx.state.roles.includes('owner')){await ctx.reply('Доступ только у руководителя.');return;}waitingStaff.add(ctx.from!.id);await ctx.reply('Отправьте числовой Telegram ID сотрудника. Права Packing Bot при этом сохраняются. Для отмены: /cancel.');});
+    bot.hears([HOME.staff,'👥 Сотрудники и доступы'],async ctx=>{if(!ctx.state.roles.includes('owner')){await ctx.reply('Доступ только у руководителя.');return;}waitingStaff.add(ctx.from!.id);await ctx.reply('Отправьте числовой Telegram ID сотрудника. Права Packing Bot при этом сохраняются. Для отмены: /cancel.');});
     bot.callbackQuery(/^role:(\d{1,15}):(invoice|accountant|remove)$/,async ctx=>{
       await ctx.answerCallbackQuery();if(!ctx.state.roles.includes('owner')||!store.setInvoiceAccess){await ctx.reply('Доступ только у руководителя.');return;}
       const id=Number(ctx.match[1]);if(!Number.isSafeInteger(id)||id<=0||ownerIds.includes(id)){await ctx.reply('Права руководителя нельзя изменить здесь.');return;}

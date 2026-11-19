@@ -22,12 +22,12 @@ export function plannedSections(kind: BotKind, roles: readonly Role[]): string[]
 export const HOME = {
   sections: '📋 Структура работы',
   history: '📂 Мои инвойсы',
-  staff: '👥 Сотрудники и доступы',
+  staff: '👥 Доступ сотрудников',
   access: '👤 Мой доступ',
   help: '❓ Помощь',
   grid: '🏷 Сетка ТН ВЭД',
   newInvoice: '📥 Новый инвойс',
-  company: '🏢 Реквизиты компаний',
+  company: '🏢 Компании',
 } as const;
 
 export function scopeText(kind: BotKind, roles: readonly Role[]): string {

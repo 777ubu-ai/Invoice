@@ -25,10 +25,16 @@ export async function validateXlsxZip(buf: Buffer): Promise<void> {
 
 function cellText(value: ExcelJS.CellValue): string {
   if (value === null || value === undefined) return '';
-  if (value instanceof Date) return value.toISOString().slice(0,10);
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString().slice(0,10) : '';
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    // Excel numeric values occasionally arrive as 3936.5200000000004.
+    // Remove only floating-point noise, preserving genuinely precise values.
+    const rounded=Math.round(value*1_000_000)/1_000_000;
+    if(Math.abs(value-rounded)<=Number.EPSILON*Math.max(1,Math.abs(value))*2)return String(rounded);
+  }
   if (typeof value === 'object') {
     if ('richText' in value && Array.isArray(value.richText)) return value.richText.map(x => x.text).join('');
-    if ('result' in value) return value.result == null ? '' : String(value.result);
+    if ('result' in value) return value.result == null ? '' : cellText(value.result as ExcelJS.CellValue);
     if ('text' in value && typeof value.text === 'string') return value.text;
     return '';
   }
